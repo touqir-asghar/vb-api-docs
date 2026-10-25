@@ -15,4 +15,4 @@ Source file: [`aion-unified-api.yaml`](aion-unified-api.yaml)
 
 1. Create a branch, edit `aion-unified-api.yaml`, and bump `info.version`.
 2. Open a pull request into `main` for review.
-3. After merge, tag the version (e.g. `v1.2.1`). The link above shows the new version automatically.
+3. After merge, tag the version (e.g. `v1.0.1`). The link above shows the new version automatically.

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: AION Unified API — Partner & Internal Integration
-  version: "1.2.1"
+  version: "1.0.0"
   description: |
     **Latest version (always up to date):**
     [Open in Swagger Editor](https://editor.swagger.io/?url=https://raw.githubusercontent.com/touqir-asghar/vb-api-docs/main/aion-unified-api.yaml)
@@ -55,8 +55,8 @@ info:
     ## MOI Refund flow (Vision Bank)
 
     1. **SME Validations** (`module_slug=moi-refund`) — when the user clicks *Request Refund*:
-       can the user initiate a refund, the corporate limits, and whether a refund for the same
-       payment already exists (pass `end_to_end_identification`).
+       can the user initiate a refund, and whether a refund for the same payment already exists
+       (pass `end_to_end_identification`). No corporate or user limits apply to MOI refunds.
     2. **Start MOI Refund Workflow** — after the consent is created and the user's OTP is
        verified. AION fetches the consent by `reference_id` and starts the approval workflow.
        - Single-owner company: the refund is executed during this call; the response carries
@@ -520,20 +520,6 @@ paths:
                     module_slug: moi-refund
                     status: REJECTED
                     process_status: ACTIVATION_FAILED
-        '400':
-          description: Corporate limits are not configured for the company (`name` = `CORPORATE_LIMIT_NOT_FOUND`).
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MoiRefundErrorResponse'
-              example:
-                statusCode: 400
-                name: CORPORATE_LIMIT_NOT_FOUND
-                errors:
-                  - name: CORPORATE_LIMIT_NOT_FOUND
-                    message: Corporate Limit Not Found
-                timestamp: '2026-10-25T09:00:00.000Z'
-                path: /rubix/api/v2/bill-payments/refunds/work-flow-process
         '401':
           description: Missing or invalid user token.
         '403':
@@ -570,27 +556,12 @@ paths:
                     timestamp: '2026-10-25T09:00:00.000Z'
                     path: /rubix/api/v2/bill-payments/refunds/work-flow-process
         '422':
-          description: >
-            The refund amount exceeds the corporate's remaining daily limit
-            (name = CORPORATE_DAILY_TRANSACTION_LIMIT_EXCEEDED), or the request body is invalid
-            (name = INPUT_VALIDATION_ERROR).
+          description: The request body is invalid (name = INPUT_VALIDATION_ERROR).
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/MoiRefundErrorResponse'
               examples:
-                limitExceeded:
-                  summary: Corporate daily limit exceeded
-                  value:
-                    statusCode: 422
-                    name: CORPORATE_DAILY_TRANSACTION_LIMIT_EXCEEDED
-                    errors:
-                      - name: CORPORATE_DAILY_TRANSACTION_LIMIT_EXCEEDED
-                        message: You have already exceeded corporate daily transaction limit i-e 500000
-                        dynamicFields:
-                          limit: 500000
-                    timestamp: '2026-10-25T09:00:00.000Z'
-                    path: /rubix/api/v2/bill-payments/refunds/work-flow-process
                 invalidBody:
                   summary: Invalid request body
                   value:
@@ -896,8 +867,8 @@ paths:
         If eligibility cannot be determined at all, an error response is returned
         instead — see the error response below.
 
-        **MOI refund (`module_slug=moi-refund`):** pass the optional
-        `end_to_end_identification` of the original payment. When the caller is eligible, AION
+        **MOI refund (`module_slug=moi-refund`):** no limits apply, so `limits` is always `null`.
+        Pass the optional `end_to_end_identification` of the original payment. When the caller is eligible, AION
         also checks whether the company already has a refund for that payment. If it does, the
         response is `eligible: false` with `reason` = `REFUND_ALREADY_IN_REVIEW` (pending approval)
         or `REFUND_ALREADY_COMPLETED` (approved), and `existing_request`. A rejected or failed
@@ -977,6 +948,12 @@ paths:
                     reason: APPROVER_AVAILABLE
                     limits: null
                     limitsError: "Request failed with status code 422"
+                moiRefundEligible:
+                  summary: MOI refund — eligible (no limits apply)
+                  value:
+                    eligible: true
+                    reason: APPROVER_AVAILABLE
+                    limits: null
                 moiRefundInReview:
                   summary: MOI refund — a refund for this payment is pending approval
                   value:
