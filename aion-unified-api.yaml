@@ -1,8 +1,12 @@
 openapi: 3.0.3
 info:
   title: AION Unified API — Partner & Internal Integration
-  version: "1.2.0"
+  version: "1.2.1"
   description: |
+    **Latest version (always up to date):**
+    [Open in Swagger Editor](https://editor.swagger.io/?url=https://raw.githubusercontent.com/touqir-asghar/vb-api-docs/main/aion-unified-api.yaml)
+    · [GitHub repository](https://github.com/touqir-asghar/vb-api-docs)
+
     Unified specification for AION's cross-service integration APIs, merged from
     previously separate documents:
 
@@ -63,6 +67,10 @@ info:
 
   contact:
     name: AION Digital Engineering
+
+externalDocs:
+  description: Latest version of this specification (opens in Swagger Editor)
+  url: https://editor.swagger.io/?url=https://raw.githubusercontent.com/touqir-asghar/vb-api-docs/main/aion-unified-api.yaml
 
 servers:
   - url: https://{host}
