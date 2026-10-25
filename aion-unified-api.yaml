@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: AION Unified API — Partner & Internal Integration
-  version: "1.3.0"
+  version: "1.0.0"
   description: |
     **Latest version (always up to date):**
     [Open in Swagger Editor](https://editor.swagger.io/?url=https://raw.githubusercontent.com/touqir-asghar/vb-api-docs/main/aion-unified-api.yaml)
