@@ -1,0 +1,1767 @@
+openapi: 3.0.3
+info:
+  title: AION Unified API — Partner & Internal Integration
+  version: "1.2.0"
+  description: |
+    Unified specification for AION's cross-service integration APIs, merged from
+    previously separate documents:
+
+    1. **Vision Bank Integration (V2)** — Reference Beneficiary / Reference Transfer /
+       Reference Bill Payment / User Access Profile.
+    2. **System Audit Logs** — centralized audit trail write API.
+    3. **Corporate Validations Orchestration** — single call that returns whether a
+       corporate customer is eligible to initiate a money transfer and, if so, their
+       current transfer limits.
+    4. **MOI Refund (Vision Bank)** — start an MOI government bill refund for
+       maker-checker approval and read its status.
+
+    ## Common request headers
+
+    Every operation in this document expects the same header contract, regardless of
+    which backing service handles it:
+
+    | Header             | Required | Purpose                                                            |
+    |---------------------|----------|---------------------------------------------------------------------|
+    | `X-Access-Token`    | Yes      | Downstream access token, forwarded as-is to internal federated services. |
+    | `X-Correlation-ID`  | No       | Trace id propagated across services for request tracing. Recommended on every call. |
+    | `X-Device-ID`       | No       | Identifier of the calling device, where applicable.                 |
+    | `X-Requester-Lang`  | No       | Preferred language (`en` / `ar`) used to localize error messages.   |
+
+    All operations require a `bearerAuth` JWT (`Authorization: Bearer <JWT>`) unless
+    individually noted. What that JWT represents still varies by operation — a
+    trusted external caller's own token for Vision Bank endpoints vs. an end-user
+    session token elsewhere — see each operation's description for specifics.
+
+    ## Reference Beneficiary / Reference Transfer flow (Vision Bank)
+
+    Single-call APIs for a trusted external system to create and immediately submit a
+    beneficiary or a money transfer for maker-checker approval.
+
+    1. AION validates the caller's token and resolves `module_slug` against that
+       caller's own entitled modules (never trusts a caller-supplied module ID).
+    2. AION calls back into the external system's own API (via AION's integration
+       layer) using the supplied `reference_id` to fetch full record details.
+    3. AION creates the draft record internally.
+    4. AION immediately initiates the approval workflow (same workflow engine used
+       by AION's own web/mobile channels). No OTP and no IVR for any beneficiary or
+       transfer type — the caller has already verified the customer.
+    5. AION returns a minimal response — the caller already holds the full record on
+       its own side.
+
+    ## MOI Refund flow (Vision Bank)
+
+    1. **SME Validations** (`module_slug=moi-refund`) — when the user clicks *Request Refund*:
+       can the user initiate a refund, the corporate limits, and whether a refund for the same
+       payment already exists (pass `end_to_end_identification`).
+    2. **Start MOI Refund Workflow** — after the consent is created and the user's OTP is
+       verified. AION fetches the consent by `reference_id` and starts the approval workflow.
+       - Single-owner company: the refund is executed during this call; the response carries
+         the final status.
+       - Otherwise: `AWAITING_AUTHORIZATION`. On final approval AION calls Vision Bank's
+         execute API with APPROVED; if an approver rejects, AION sends REJECTED.
+    3. **Get MOI Refund Workflow Status** — AION's current status for a refund.
+
+  contact:
+    name: AION Digital Engineering
+
+servers:
+  - url: https://{host}
+    description: >-
+      Shared API gateway host. Each path below already includes its own service
+      prefix (e.g. /api/v2/..., /v1/user/..., /audit/..., /api/v1/orchestration/...).
+    variables:
+      host:
+        default: vbksa.com
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Reference Beneficiary Workflow
+    description: Beneficiary management service — single-call beneficiary creation + workflow initiation.
+  - name: Reference Transfer Workflow
+    description: Money transfer service — single-call transfer creation + workflow initiation.
+  - name: Reference Bill Payment Workflow
+    description: Bill payment service — single-call bill payment creation + workflow initiation.
+  - name: Reference MOI Refund Workflow
+    description: Bill payment service — MOI government bill refund workflow initiation and status.
+  - name: User Access Profile
+    description: Entitlement service — user roles, modules, and permissions lookup.
+  - name: System Audit Logs
+    description: Centralized audit trail write API.
+  - name: Corporate Validations Orchestration
+
+paths:
+  /api/v2/beneficiary-management/work-flow-process:
+    post:
+      tags: [Reference Beneficiary Workflow]
+      summary: Create and immediately initiate a beneficiary workflow
+      description: >
+        This API will be used to initiate the workflow for the beneficiary creation. X-Access-Token token is a trusted
+        Forgerock token (Vision Bank) which is user JWT received from API Gateway.
+      operationId: initiateReferenceBeneficiary
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XAccessToken'
+        - $ref: '#/components/parameters/XCorrelationId'
+        - $ref: '#/components/parameters/XDeviceId'
+        - $ref: '#/components/parameters/XRequesterLang'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReferenceBeneficiaryInitiateRequest'
+            examples:
+              local:
+                summary: Local beneficiary
+                value:
+                  module_slug: beneficiary_management-local_beneficiary
+                  reference_id: VBANK-BENE-LOCAL-001
+              internal:
+                summary: Internal beneficiary
+                value:
+                  module_slug: beneficiary_management-internal_beneficiary
+                  reference_id: VBANK-BENE-INTERNAL-001
+      responses:
+        '200':
+          description: >
+            Draft created and workflow initiated — no OTP, no IVR for any beneficiary
+            type. Status reflects the outcome after workflow start
+            (e.g. APPROVED for an auto-approved request, AWAITING_AUTHORIZATION if it
+            needs a maker-checker approval).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReferenceBeneficiaryResponse'
+              example:
+                reference_id: VBANK-BENE-BROKERAGE-001
+                id: 2D4FC6C8-0D5F-4208-BE4C-161BD2EE7223
+                module_slug: beneficiary_management-brokerage_beneficiary
+                status: AWAITING_AUTHORIZATION
+        '400':
+          description: module_slug is missing, malformed, or not one of the currently supported types.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VisionBankErrorResponse'
+              example:
+                statusCode: 400
+                message: "Unsupported module_slug for reference transfers: some-unknown-slug"
+                error: Bad Request
+        '403':
+          description: The caller's token lacks create/initiate permission on it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VisionBankErrorResponse'
+              example:
+                statusCode: 403
+                message: Forbidden
+                error: Forbidden
+
+  /api/v2/beneficiary-management/{reference_id}/activation-status:
+    put:
+      tags: [Reference Beneficiary Workflow]
+      summary: Finalize a reference beneficiary's activation status
+      description: >
+        Called by the external system (e.g. Vision Bank) once it has made its own final
+        activation decision for a reference beneficiary previously initiated via
+        POST work-flow-process — however it gets there (IVR or otherwise) is entirely on
+        the external system's side; AION doesn't manage or model that step, it just records
+        the final word.
+
+
+        Only succeeds if the beneficiary is currently ACTIVATION_PENDING (i.e. AION's own
+        maker-checker has already approved it and it is genuinely awaiting this final
+        decision) — calling it on a record that isn't pending activation (not yet approved,
+        or already finalized by a previous call) returns 404.
+      operationId: updateReferenceBeneficiaryActivationStatus
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XAccessToken'
+        - $ref: '#/components/parameters/XCorrelationId'
+        - $ref: '#/components/parameters/XDeviceId'
+        - $ref: '#/components/parameters/XRequesterLang'
+        - name: reference_id
+          in: path
+          required: true
+          description: The external system's own reference id, as originally supplied to work-flow-process.
+          schema:
+            type: string
+          example: VBANK-BENE-LOCAL-001
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReferenceBeneficiaryActivationStatusRequest'
+            examples:
+              approved:
+                summary: Final activation approved
+                value:
+                  status: APPROVED
+              rejected:
+                summary: Final activation rejected
+                value:
+                  status: REJECTED
+      responses:
+        '200':
+          description: Status finalized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReferenceBeneficiaryActivationStatusResponse'
+              example:
+                reference_id: VBANK-BENE-LOCAL-001
+                id: 2D4FC6C8-0D5F-4208-BE4C-161BD2EE7223
+                status: APPROVED
+        '404':
+          description: >
+            No beneficiary awaiting activation was found for reference_id — either AION's own
+            maker-checker hasn't approved it yet, or it was already finalized by a previous call.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VisionBankErrorResponse'
+              example:
+                statusCode: 404
+                message: "No beneficiary awaiting activation found for reference_id=VBANK-BENE-LOCAL-001"
+                error: Not Found
+        '403':
+          description: The caller's token lacks approve permission on it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VisionBankErrorResponse'
+              example:
+                statusCode: 403
+                message: Forbidden
+                error: Forbidden
+
+  /api/v2/beneficiary-management/{reference_id}/workflow-status:
+    get:
+      tags: [Reference Beneficiary Workflow]
+      summary: Get AION's current workflow status for a reference beneficiary
+      description: >
+        Returns AION's own application_status/process_status for a beneficiary initiated via
+        POST work-flow-process — distinct from the external system's own record data. Useful
+        for polling whether AION's maker-checker has approved yet, and whether the beneficiary
+        is currently ACTIVATION_PENDING (awaiting the external system's own final activation
+        decision via PUT activation-status).
+      operationId: getReferenceBeneficiaryWorkflowStatus
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XAccessToken'
+        - $ref: '#/components/parameters/XCorrelationId'
+        - $ref: '#/components/parameters/XDeviceId'
+        - $ref: '#/components/parameters/XRequesterLang'
+        - name: reference_id
+          in: path
+          required: true
+          description: The external system's own reference id, as originally supplied to work-flow-process.
+          schema:
+            type: string
+          example: VBANK-BENE-LOCAL-001
+      responses:
+        '200':
+          description: AION's current status for this reference_id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReferenceBeneficiaryWorkflowStatusResponse'
+              examples:
+                activationPending:
+                  summary: Awaiting the external system's own final activation decision
+                  value:
+                    reference_id: VBANK-BENE-LOCAL-001
+                    id: 2D4FC6C8-0D5F-4208-BE4C-161BD2EE7223
+                    application_status: APPROVED
+                    process_status: ACTIVATION_PENDING
+                deletionPending:
+                  summary: A deletion request is awaiting maker-checker approval
+                  value:
+                    reference_id: VBANK-BENE-LOCAL-001
+                    id: 2D4FC6C8-0D5F-4208-BE4C-161BD2EE7223
+                    application_status: APPROVED
+                    process_status: DELETION_PENDING
+                updationPending:
+                  summary: An update request is awaiting maker-checker approval
+                  value:
+                    reference_id: VBANK-BENE-LOCAL-001
+                    id: 2D4FC6C8-0D5F-4208-BE4C-161BD2EE7223
+                    application_status: APPROVED
+                    process_status: UPDATION_PENDING
+                noSecondaryStatus:
+                  summary: No secondary process in progress
+                  value:
+                    reference_id: VBANK-BENE-LOCAL-001
+                    id: 2D4FC6C8-0D5F-4208-BE4C-161BD2EE7223
+                    application_status: AWAITING_AUTHORIZATION
+                    process_status: null
+        '404':
+          description: reference_id was not found for any beneficiary initiated through this endpoint.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VisionBankErrorResponse'
+              example:
+                statusCode: 404
+                message: "No reference beneficiary found for reference_id=VBANK-BENE-LOCAL-001"
+                error: Not Found
+
+  /api/v2/money-transfers/work-flow-process:
+    post:
+      tags: [Reference Transfer Workflow]
+      summary: Create and immediately initiate a transfer
+      description: >
+        X-Access-Token token is a trusted
+        Forgerock token (Vision Bank) which is user JWT received from API Gateway.
+      operationId: initiateReferenceTransfer
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XAccessToken'
+        - $ref: '#/components/parameters/XCorrelationId'
+        - $ref: '#/components/parameters/XDeviceId'
+        - $ref: '#/components/parameters/XRequesterLang'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReferenceTransferInitiateRequest'
+            examples:
+              domestic:
+                summary: Domestic transfer
+                value:
+                  module_slug: transfer_management-domestic_bank_transfer
+                  reference_id: VBANK-TRANS-DOMESTIC-001
+              internal:
+                summary: Internal transfer
+                value:
+                  module_slug: transfer_management-internal_transfer
+                  reference_id: VBANK-TRANS-INTERNAL-001
+      responses:
+        '200':
+          description: >
+            Draft created and workflow initiated. Response is deliberately minimal
+            (Vision Bank already holds the full record on its own side). status
+            reflects the outcome after workflow start (e.g. APPROVED for
+            auto-approved requests, AWAITING_AUTHORIZATION if it needs a
+            maker-checker approval).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReferenceTransferResponse'
+              example:
+                reference_id: VBANK-TRANS-DOMESTIC-001
+                id: 11C16EA1-B3B7-4D79-8EE5-9981AEB56300
+                module_slug: transfer_management-domestic_bank_transfer
+                status: AWAITING_AUTHORIZATION
+        '400':
+          description: module_slug is missing, malformed, or not one of the currently supported types.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VisionBankErrorResponse'
+              example:
+                statusCode: 400
+                message: "Unsupported module_slug for reference transfers: some-unknown-slug"
+                error: Bad Request
+        '403':
+          description: The caller's token lacks initiate permission on it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VisionBankErrorResponse'
+              example:
+                statusCode: 403
+                message: Forbidden
+                error: Forbidden
+
+  /api/v2/bill-payments/work-flow-process:
+    post:
+      tags: [Reference Bill Payment Workflow]
+      summary: Create and immediately initiate a bill payment
+      description: >
+        X-Access-Token token is a trusted
+        Forgerock token (Vision Bank) which is user JWT received from API Gateway.
+      operationId: initiateReferenceBillPayment
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XAccessToken'
+        - $ref: '#/components/parameters/XCorrelationId'
+        - $ref: '#/components/parameters/XDeviceId'
+        - $ref: '#/components/parameters/XRequesterLang'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReferenceBillPaymentInitiateRequest'
+            examples:
+              sadad:
+                summary: SADAD Bill payment
+                value:
+                  module_slug: bill-payment-sadad
+                  reference_id: VBANK-BILL-001
+              moi:
+                summary: MOI Bill payment
+                value:
+                  module_slug: bill-payment-moi
+                  reference_id: VBANK-BILL-001
+      responses:
+        '200':
+          description: >
+            Draft created and workflow initiated. Response is deliberately minimal
+            (Vision Bank already holds the full record on its own side). status
+            reflects the outcome after workflow start (e.g. APPROVED for
+            auto-approved requests, AWAITING_AUTHORIZATION if it needs a
+            maker-checker approval).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReferenceBillPaymentResponse'
+              example:
+                reference_id: VBANK-BILL-001
+                id: 7A2E9F41-6C3D-4B8A-9E5F-2D1C8B4A7E90
+                module_slug: bill-payment-type
+                status: AWAITING_AUTHORIZATION
+        '400':
+          description: module_slug is missing, malformed, or not one of the currently supported types.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VisionBankErrorResponse'
+              example:
+                statusCode: 400
+                message: "Unsupported module_slug for reference transfers: some-unknown-slug"
+                error: Bad Request
+        '403':
+          description: The caller's token lacks initiate permission on it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VisionBankErrorResponse'
+              example:
+                statusCode: 403
+                message: Forbidden
+                error: Forbidden
+
+  /api/v2/bill-payments/refunds/work-flow-process:
+    post:
+      tags: [Reference MOI Refund Workflow]
+      summary: Start MOI Refund Workflow
+      description: >
+        Starts the approval workflow for an MOI refund consent created by Vision Bank. AION fetches
+        the consent by reference_id and starts the workflow. A reference_id can start only one
+        refund. X-Access-Token token is a trusted Forgerock token (Vision Bank) which is user JWT
+        received from API Gateway.
+      operationId: startMoiRefundWorkflow
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XAccessToken'
+        - $ref: '#/components/parameters/XCorrelationId'
+        - $ref: '#/components/parameters/XDeviceId'
+        - $ref: '#/components/parameters/XRequesterLang'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartMoiRefundRequest'
+            example:
+              module_slug: moi-refund
+              reference_id: 55555555-5555-4555-8555-555555555555
+      responses:
+        '201':
+          description: Refund request created and workflow started.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartMoiRefundResponse'
+              examples:
+                awaitingApproval:
+                  summary: Needs approval
+                  value:
+                    reference_id: 55555555-5555-4555-8555-555555555555
+                    id: 8FF53AF0-D149-4B3B-81C1-2455FC08ED2B
+                    module_slug: moi-refund
+                    status: AWAITING_AUTHORIZATION
+                    process_status: ACTIVATION_PENDING
+                singleOwnerExecuted:
+                  summary: Single owner - refund executed
+                  value:
+                    reference_id: 55555555-5555-4555-8555-555555555555
+                    id: 8FF53AF0-D149-4B3B-81C1-2455FC08ED2B
+                    module_slug: moi-refund
+                    status: APPROVED
+                    process_status: ACTIVATION_COMPLETED
+                    transaction_id: RF-55555555
+                singleOwnerFailed:
+                  summary: Single owner - refund execution failed
+                  value:
+                    reference_id: 55555555-5555-4555-8555-555555555555
+                    id: 8FF53AF0-D149-4B3B-81C1-2455FC08ED2B
+                    module_slug: moi-refund
+                    status: REJECTED
+                    process_status: ACTIVATION_FAILED
+        '400':
+          description: Corporate limits are not configured for the company (`name` = `CORPORATE_LIMIT_NOT_FOUND`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MoiRefundErrorResponse'
+              example:
+                statusCode: 400
+                name: CORPORATE_LIMIT_NOT_FOUND
+                errors:
+                  - name: CORPORATE_LIMIT_NOT_FOUND
+                    message: Corporate Limit Not Found
+                timestamp: '2026-10-25T09:00:00.000Z'
+                path: /rubix/api/v2/bill-payments/refunds/work-flow-process
+        '401':
+          description: Missing or invalid user token.
+        '403':
+          $ref: '#/components/responses/MoiRefundForbidden'
+        '409':
+          description: >
+            The reference_id was already used, or another refund for the same payment is pending
+            approval or approved. errors.message says which.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MoiRefundErrorResponse'
+              examples:
+                referenceAlreadyUsed:
+                  summary: Same reference_id sent again
+                  value:
+                    statusCode: 409
+                    name: ConflictException
+                    errors:
+                      statusCode: 409
+                      message: This refund request is already pending approval (reference_id 55555555-5555-4555-8555-555555555555)
+                      error: Conflict
+                    timestamp: '2026-10-25T09:00:00.000Z'
+                    path: /rubix/api/v2/bill-payments/refunds/work-flow-process
+                paymentAlreadyRefunding:
+                  summary: Another refund for the same payment exists
+                  value:
+                    statusCode: 409
+                    name: ConflictException
+                    errors:
+                      statusCode: 409
+                      message: A refund for this payment is already pending approval (reference_id 44444444-4444-4444-8444-444444444444)
+                      error: Conflict
+                    timestamp: '2026-10-25T09:00:00.000Z'
+                    path: /rubix/api/v2/bill-payments/refunds/work-flow-process
+        '422':
+          description: >
+            The refund amount exceeds the corporate's remaining daily limit
+            (name = CORPORATE_DAILY_TRANSACTION_LIMIT_EXCEEDED), or the request body is invalid
+            (name = INPUT_VALIDATION_ERROR).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MoiRefundErrorResponse'
+              examples:
+                limitExceeded:
+                  summary: Corporate daily limit exceeded
+                  value:
+                    statusCode: 422
+                    name: CORPORATE_DAILY_TRANSACTION_LIMIT_EXCEEDED
+                    errors:
+                      - name: CORPORATE_DAILY_TRANSACTION_LIMIT_EXCEEDED
+                        message: You have already exceeded corporate daily transaction limit i-e 500000
+                        dynamicFields:
+                          limit: 500000
+                    timestamp: '2026-10-25T09:00:00.000Z'
+                    path: /rubix/api/v2/bill-payments/refunds/work-flow-process
+                invalidBody:
+                  summary: Invalid request body
+                  value:
+                    statusCode: 422
+                    name: INPUT_VALIDATION_ERROR
+                    errors:
+                      - name: MODULE_SLUG_ISIN
+                        message: 'module_slug must be one of the following values: moi-refund'
+                        developerMessage: 'module_slug must be one of the following values: moi-refund'
+                        field: module_slug
+                        value: moi-payment
+                    timestamp: '2026-10-25T09:00:00.000Z'
+                    path: /rubix/api/v2/bill-payments/refunds/work-flow-process
+
+  /api/v2/bill-payments/refunds/{reference_id}/workflow-status:
+    get:
+      tags: [Reference MOI Refund Workflow]
+      summary: Get MOI Refund Workflow Status
+      description: >
+        AION's current status for the refund started with this reference_id, for the user's company.
+        If no refund exists, the response is HTTP 200 with status NONE.
+      operationId: getMoiRefundWorkflowStatus
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XAccessToken'
+        - $ref: '#/components/parameters/XCorrelationId'
+        - $ref: '#/components/parameters/XDeviceId'
+        - $ref: '#/components/parameters/XRequesterLang'
+        - name: reference_id
+          in: path
+          required: true
+          description: The consent id the refund was started with.
+          schema:
+            type: string
+          example: 55555555-5555-4555-8555-555555555555
+      responses:
+        '200':
+          description: Current status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MoiRefundWorkflowStatusResponse'
+              examples:
+                awaitingApproval:
+                  summary: Pending approval
+                  value:
+                    reference_id: 55555555-5555-4555-8555-555555555555
+                    module_slug: moi-refund
+                    id: 8FF53AF0-D149-4B3B-81C1-2455FC08ED2B
+                    status: AWAITING_AUTHORIZATION
+                    process_status: ACTIVATION_PENDING
+                    in_review: true
+                approved:
+                  summary: Approved - refund executed
+                  value:
+                    reference_id: 55555555-5555-4555-8555-555555555555
+                    module_slug: moi-refund
+                    id: 8FF53AF0-D149-4B3B-81C1-2455FC08ED2B
+                    status: APPROVED
+                    process_status: ACTIVATION_COMPLETED
+                    in_review: false
+                rejectedByApprover:
+                  summary: Rejected by an approver
+                  value:
+                    reference_id: 55555555-5555-4555-8555-555555555555
+                    module_slug: moi-refund
+                    id: 8FF53AF0-D149-4B3B-81C1-2455FC08ED2B
+                    status: REJECTED
+                    process_status: ACTIVATION_PENDING
+                    in_review: false
+                executionFailed:
+                  summary: Approved, but refund execution failed
+                  value:
+                    reference_id: 55555555-5555-4555-8555-555555555555
+                    module_slug: moi-refund
+                    id: 8FF53AF0-D149-4B3B-81C1-2455FC08ED2B
+                    status: REJECTED
+                    process_status: ACTIVATION_FAILED
+                    in_review: false
+                notFound:
+                  summary: No refund for this reference_id
+                  value:
+                    reference_id: 55555555-5555-4555-8555-555555555555
+                    module_slug: moi-refund
+                    id: null
+                    status: NONE
+                    process_status: null
+                    in_review: false
+        '401':
+          description: Missing or invalid user token.
+        '403':
+          $ref: '#/components/responses/MoiRefundForbidden'
+
+  /v1/user/access-profile-context:
+    get:
+      tags: [User Access Profile]
+      summary: Fetch User Access Profile
+      description: Retrieves detailed user profile along with assigned roles, active modules, and granular permissions.
+      operationId: getUserAccessProfile
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XAccessToken'
+        - $ref: '#/components/parameters/XCorrelationId'
+        - $ref: '#/components/parameters/XDeviceId'
+        - $ref: '#/components/parameters/XRequesterLang'
+      responses:
+        '200':
+          description: Successfully retrieved user profile details.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserAccessResponse'
+              example:
+                id: "DCACE77B-1C27-4F09-8535-E97EB7B5D372"
+                user_name: "omerCSAnew"
+                email: "testom@gmail.com"
+                user_type: "EXTERNAL"
+                is_super_admin: true
+                roles:
+                  - id: "B158928D-3C71-4CFC-AA9C-4B167CCDBC58"
+                    name: "CSA Full Access"
+                    role_slug: "CSA-full-access"
+                    status: "ACTIVE"
+                modules:
+                  - id: "FD6FC89F-5E10-4F66-B5B3-A977E6638DB5"
+                    name: "Merchant Statement"
+                    name_ar: "كشف التاجر"
+                    slug: "service-request-merchant-statement"
+                    module_category: "FINANCIAL"
+                    is_limit_enabled: true
+                    is_authority_matrix_enabled: true
+                    applications:
+                      - id: "869F32D0-34DF-4B29-9AD0-F02F58E55A04"
+                        name: "Account Services"
+                        slug: "accounts"
+                    permissions:
+                      - id: "4CFE2AF5-829D-49C7-924B-B2FB3590BAEF"
+                        module_permission_id: "08964CA4-78C3-4596-A681-34A454CDE7A3"
+                        record_type: "approve"
+                        is_restricted: false
+                    status: "ACTIVE"
+                permissions:
+                  - "approve:system-access-policy"
+                  - "initiate:system-access-policy"
+                  - "view:system-access-policy"
+                status: "ACTIVE"
+                has_full_access: true
+                is_corporate_super_admin: false
+        '404':
+          description: User or CR details not found.
+  /audit/system:
+    post:
+      tags: [System Audit Logs]
+      summary: Create a new System Audit Log
+      description: >-
+        A successful request returns the HTTP 201 CREATED status code and a JSON
+        response body with the created System Audit Log. Requires a valid
+        authenticated session (AuthGuard) — no fine-grained permission check is
+        enforced on this route. `tenant_id` is carried in the request body for this
+        endpoint (audit records are tenant-scoped data).
+      operationId: createSystemAuditLog
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XAccessToken'
+        - $ref: '#/components/parameters/XCorrelationId'
+        - $ref: '#/components/parameters/XDeviceId'
+        - $ref: '#/components/parameters/XRequesterLang'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSystemAuditLogDto'
+            example:
+              tenant_id: "8f14e45f-ceea-467e-bd88-example-tenant"
+              audit_code: "PAYMENT_TRANSFER_SUCCESS"
+              correlation_id: "b3f1c2e0-1234-4a5b-9c6d-abcdef012345"
+              module_slug: "payments"
+              module_id: "6c9d1a2b-3e4f-4a5b-8c7d-6e5f4a3b2c1d"
+              module_name: "Payments"
+              customer_id: "1a2b3c4d-5e6f-4a5b-8c7d-6e5f4a3b2c1d"
+              customer_no: "CUST-00123"
+              customer_account: "AC-998877"
+              user_id: "u-7788"
+              user_name: "ahmadraza"
+              user_type: "corporate"
+              channel_id: "RUBIX-CORP-WEB"
+              channel_name: "Corporate Web"
+              channel_type: "WEB"
+              branch_id: "br-001"
+              branch_name: "Main Branch"
+              activity_id: "act-001"
+              activity: "TRANSFER"
+              audit_text: "Payment of 500.00 USD transferred successfully"
+              log_content:
+                url: "/api/v1/payments/transfer"
+                method: "POST"
+                body:
+                  amount: 500.00
+                  currency: "USD"
+                response:
+                  status: "SUCCESS"
+              trans_ref_no: "b3f1c2e0-1234-4a5b-9c6d-abcdef012345"
+              pan: null
+              ip_address: "10.0.0.14"
+              country_code: "AE"
+              language_code: "en"
+              remarks: "Manual test via Postman"
+              status: "SUCCESS"
+              response_code: "200"
+              trans_node: "payment-service-pod-3"
+              created_by: "u-7788"
+      responses:
+        '201':
+          description: The created System Audit Log.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemAuditLog'
+              example:
+                id: "3f9a1c2e-5b6d-4a7c-8e9f-0a1b2c3d4e5f"
+                tenant_id: "8f14e45f-ceea-467e-bd88-example-tenant"
+                correlation_id: "b3f1c2e0-1234-4a5b-9c6d-abcdef012345"
+                user_id: "u-7788"
+                user_name: "ahmadraza"
+                user_type: "corporate"
+                channel_id: "RUBIX-CORP-WEB"
+                channel_name: "Corporate Web"
+                channel_type: "WEB"
+                module_id: "6c9d1a2b-3e4f-4a5b-8c7d-6e5f4a3b2c1d"
+                module_name: "Payments"
+                branch_id: "br-001"
+                branch_name: "Main Branch"
+                activity_id: "act-001"
+                activity: "TRANSFER"
+                audit_code: "PAYMENT_TRANSFER_SUCCESS"
+                audit_text: "Payment of 500.00 USD transferred successfully"
+                log_content: "{\"url\":\"/api/v1/payments/transfer\",\"method\":\"POST\",\"body\":{\"amount\":500,\"currency\":\"USD\"},\"response\":{\"status\":\"SUCCESS\"}}"
+                trans_ref_no: "b3f1c2e0-1234-4a5b-9c6d-abcdef012345"
+                customer_account: "AC-998877"
+                customer_no: "CUST-00123"
+                pan: null
+                ip_address: "10.0.0.14"
+                country_code: "AE"
+                language_code: "en"
+                remarks: "Manual test via Postman"
+                status: "SUCCESS"
+                response_code: "200"
+                created_on: "2026-08-13T10:15:32.000Z"
+                created_by: "u-7788"
+                updated_on: null
+                updated_by: null
+        '400':
+          description: Validation failed (e.g. missing tenant_id / audit_code).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditErrorResponse'
+              example:
+                statusCode: 400
+                name: "INPUT_VALIDATION_ERROR"
+                errors:
+                  - property: "tenant_id"
+                    constraints:
+                      isNotEmpty: "tenant_id should not be empty"
+                timestamp: "2026-08-13T10:15:32.000Z"
+                path: "/api/v1/audit/audit/system"
+        '401':
+          description: Missing or invalid authentication token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditErrorResponse'
+              example:
+                statusCode: 401
+                name: "UnauthorizedException"
+                errors: []
+                timestamp: "2026-08-13T10:15:32.000Z"
+                path: "/api/v1/audit/audit/system"
+
+  /api/v1/orchestration/sme-validations:
+    get:
+      tags: [Corporate Validations Orchestration]
+      summary: Check corporate eligibility and fetch transfer limits in one call
+      description: >
+        Returns whether the caller is eligible to initiate a request and, if
+        eligible and applicable, the caller's current transfer limits for
+        `module_slug`.
+
+        If the caller is eligible, `limits` contains the limit details — unless
+        `module_slug` has no limits concept (e.g. a beneficiary module), in which
+        case `limits` is simply `null` with no error. Fetching limits is otherwise
+        best-effort: if that lookup fails, the response is still `200` with
+        `limits: null` and a `limitsError` string describing the failure, since
+        eligibility — the authoritative result — was already determined.
+
+        If the caller is not eligible, `limits` is `null` and no further detail is
+        surfaced.
+
+        If eligibility cannot be determined at all, an error response is returned
+        instead — see the error response below.
+
+        **MOI refund (`module_slug=moi-refund`):** pass the optional
+        `end_to_end_identification` of the original payment. When the caller is eligible, AION
+        also checks whether the company already has a refund for that payment. If it does, the
+        response is `eligible: false` with `reason` = `REFUND_ALREADY_IN_REVIEW` (pending approval)
+        or `REFUND_ALREADY_COMPLETED` (approved), and `existing_request`. A rejected or failed
+        refund does not block a new one.
+      operationId: getCorporateValidations
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XAccessToken'
+        - $ref: '#/components/parameters/XCorrelationId'
+        - $ref: '#/components/parameters/XDeviceId'
+        - $ref: '#/components/parameters/XRequesterLang'
+        - name: module_slug
+          in: query
+          description: Identifies the transfer module to check eligibility and limits for.
+          required: true
+          schema:
+            type: string
+            enum:
+              - transfer_management-internal_bank_transfer
+              - transfer_management-domestic_bank_transfer
+              - beneficiary_management
+              - term_deposit
+              - moi-refund
+          example: transfer_management-domestic_bank_transfer
+        - name: end_to_end_identification
+          in: query
+          required: false
+          description: >
+            MOI refund only - end-to-end id of the original MOI payment. Enables the duplicate
+            refund check.
+          schema:
+            type: string
+          example: E2E-20261009-123456
+      responses:
+        '200':
+          description: >
+            Returned whenever an eligibility determination could be made,
+            regardless of the result. See the examples below.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CorporateValidationsResponse'
+              examples:
+                eligible:
+                  summary: Eligible — limits fetched successfully
+                  value:
+                    eligible: true
+                    reason: APPROVER_AVAILABLE
+                    limits:
+                      customer_id: 8A7F6E5D-4C3B-2A19-8E7F-6D5C4B3A2910
+                      module_id: 6C9D1A2B-3E4F-4A5B-8C7D-6E5F4A3B2C1D
+                      utilised_limit_date: '2026-10-25'
+                      min_limit: 0
+                      max_limit: 500000
+                      per_transaction_limit: 100000
+                      transaction_limit: 100000
+                      utilised_amount: 175000
+                      utilised_no_transactions: 12
+                      amount_left: 325000
+                blocked:
+                  summary: Not eligible — limits call skipped entirely
+                  value:
+                    eligible: false
+                    reason: NO_INITIATE_PERMISSION
+                    limits: null
+                eligibleNoLimits:
+                  summary: Eligible, but limits don't apply to this module_slug (e.g. beneficiary)
+                  value:
+                    eligible: true
+                    reason: APPROVER_AVAILABLE
+                    limits: null
+                limitsFailed:
+                  summary: Eligible, but the best-effort limits fetch failed
+                  value:
+                    eligible: true
+                    reason: APPROVER_AVAILABLE
+                    limits: null
+                    limitsError: "Request failed with status code 422"
+                moiRefundInReview:
+                  summary: MOI refund — a refund for this payment is pending approval
+                  value:
+                    eligible: false
+                    reason: REFUND_ALREADY_IN_REVIEW
+                    limits: null
+                    existing_request:
+                      reference_id: 55555555-5555-4555-8555-555555555555
+                      id: 8FF53AF0-D149-4B3B-81C1-2455FC08ED2B
+                      status: AWAITING_AUTHORIZATION
+                      process_status: ACTIVATION_PENDING
+                moiRefundCompleted:
+                  summary: MOI refund — a refund for this payment is already approved
+                  value:
+                    eligible: false
+                    reason: REFUND_ALREADY_COMPLETED
+                    limits: null
+                    existing_request:
+                      reference_id: 55555555-5555-4555-8555-555555555555
+                      id: 8FF53AF0-D149-4B3B-81C1-2455FC08ED2B
+                      status: APPROVED
+                      process_status: ACTIVATION_COMPLETED
+        '4XX':
+          description: Eligibility could not be determined.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CorporateValidationsErrorResponse'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        JWT bearer token, required on every operation in this document. What the
+        token represents differs by endpoint: for the Reference Beneficiary/Transfer
+        endpoints it is a trusted external system's own token (e.g. Vision Bank);
+        for User Access Profile, System Audit Logs, and Corporate Validations
+        Orchestration it is the standard AION session token used by any other
+        channel. See each operation's description for specifics.
+
+  parameters:
+    XAccessToken:
+      name: X-Access-Token
+      in: header
+      required: true
+      description: >
+        Downstream access token, forwarded as-is to internal federated services.
+      schema:
+        type: string
+    XCorrelationId:
+      name: X-Correlation-ID
+      in: header
+      required: false
+      description: Correlation/trace id propagated across services for request tracing. Recommended on every call.
+      schema:
+        type: string
+        format: uuid
+    XDeviceId:
+      name: X-Device-ID
+      in: header
+      required: false
+      description: Identifier of the calling device, where applicable.
+      schema:
+        type: string
+    XRequesterLang:
+      name: X-Requester-Lang
+      in: header
+      required: false
+      description: Requester's preferred language (`en` / `ar`), used to localize error messages.
+      schema:
+        type: string
+        enum: [en, ar]
+        default: en
+
+  responses:
+    MoiRefundForbidden:
+      description: The user is not allowed to perform this action on `moi-refund`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/MoiRefundErrorResponse'
+          example:
+            statusCode: 403
+            name: ForbiddenException
+            errors:
+              statusCode: 403
+              message: Forbidden resource
+              error: Forbidden
+            timestamp: '2026-10-25T09:00:00.000Z'
+            path: /rubix/api/v2/bill-payments/refunds/work-flow-process
+
+  schemas:
+    # --- Reference Beneficiary / Reference Transfer (Vision Bank) ---
+    ReferenceBeneficiaryInitiateRequest:
+      type: object
+      required: [module_slug, reference_id]
+      properties:
+        module_slug:
+          type: string
+          description: Identifies the beneficiary type.
+          enum:
+            - beneficiary_management-local_beneficiary
+            - beneficiary_management-internal_beneficiary
+          example: beneficiary_management-local_beneficiary
+        reference_id:
+          type: string
+          description: Vision Bank's own reference id for this beneficiary.
+          example: VBANK-BENE-12345
+
+    ReferenceBeneficiaryResponse:
+      type: object
+      properties:
+        reference_id:
+          type: string
+          description: The external system's own reference id, echoed back from the request.
+          example: VBANK-BENE-12345
+        id:
+          type: string
+          format: uuid
+          description: AION beneficiary request id created for this reference_id.
+        module_slug:
+          type: string
+          description: module_slug the request was resolved against, echoed back from the request.
+          example: beneficiary_management-local_beneficiary
+        status:
+          type: string
+          enum: [DRAFT, AWAITING_AUTHORIZATION, APPROVED, REJECTED]
+          description: >
+            Current maker-checker application status after workflow initiation.
+            No IVR/PENDING_IVR state occurs via this API — no OTP or IVR is
+            required for any beneficiary type.
+
+    ReferenceBeneficiaryActivationStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [APPROVED, REJECTED]
+          description: >
+            Final activation decision from the external system, sent once it has made its own
+            final decision — however it gets there (IVR or otherwise) is entirely on the
+            external system's side; AION doesn't manage or model that step.
+          example: APPROVED
+
+    ReferenceBeneficiaryActivationStatusResponse:
+      type: object
+      properties:
+        reference_id:
+          type: string
+          description: The external system's own reference id, echoed back from the request.
+          example: VBANK-BENE-LOCAL-001
+        id:
+          type: string
+          format: uuid
+          description: AION beneficiary request id.
+        status:
+          type: string
+          enum: [APPROVED, REJECTED]
+          description: The finalized status, echoed back from the request.
+
+    ReferenceBeneficiaryWorkflowStatusResponse:
+      type: object
+      properties:
+        reference_id:
+          type: string
+          description: The external system's own reference id, echoed back from the request.
+          example: VBANK-BENE-LOCAL-001
+        id:
+          type: string
+          format: uuid
+          description: AION beneficiary request id.
+        application_status:
+          type: string
+          enum: [DRAFT, AWAITING_AUTHORIZATION, APPROVED, REJECTED]
+          description: AION's maker-checker application status.
+        process_status:
+          type: string
+          description: >
+            Secondary status tracking activity beyond the maker-checker decision itself — e.g.
+            ACTIVATION_PENDING means AION has approved but is awaiting the external system's own
+            final activation decision (see PUT activation-status). Not an exhaustive list: more
+            values will be added over time as new flows are onboarded (deletion/update requests
+            follow the same *_PENDING pattern), so treat this as an open set rather than a fixed
+            enum when validating responses.
+          enum: [ACTIVATION_PENDING, DELETION_PENDING, UPDATION_PENDING]
+          example: ACTIVATION_PENDING
+          nullable: true
+
+    ReferenceTransferInitiateRequest:
+      type: object
+      required: [module_slug, reference_id]
+      properties:
+        module_slug:
+          type: string
+          description: Identifies the transfer type.
+          enum:
+            - transfer_management-domestic_bank_transfer
+            - transfer_management-one_time_transfer
+          example: transfer_management-domestic_bank_transfer
+        reference_id:
+          type: string
+          description: Vision Bank's own reference id for this transfer.
+          example: VBANK-TRANS-54321
+
+    ReferenceTransferResponse:
+      type: object
+      properties:
+        reference_id:
+          type: string
+          description: The external system's own reference id, echoed back from the request.
+          example: VBANK-TRANS-54321
+        id:
+          type: string
+          format: uuid
+          description: AION money transfer request id created for this reference_id.
+        module_slug:
+          type: string
+          description: module_slug the request was resolved against, echoed back from the request.
+          example: transfer_management-domestic_bank_transfer
+        status:
+          type: string
+          enum: [DRAFT, AWAITING_AUTHORIZATION, APPROVED, REJECTED]
+          description: Current maker-checker application status after workflow initiation.
+
+    ReferenceBillPaymentInitiateRequest:
+      type: object
+      required: [module_slug, reference_id]
+      properties:
+        module_slug:
+          type: string
+          description: Identifies the bill payment type.
+          example: bill-payment-type
+        reference_id:
+          type: string
+          description: Vision Bank's own reference id for this bill payment.
+          example: VBANK-BILL-12345
+
+    ReferenceBillPaymentResponse:
+      type: object
+      properties:
+        reference_id:
+          type: string
+          description: The external system's own reference id, echoed back from the request.
+          example: VBANK-BILL-12345
+        id:
+          type: string
+          format: uuid
+          description: AION bill payment request id created for this reference_id.
+        module_slug:
+          type: string
+          description: module_slug the request was resolved against, echoed back from the request.
+          example: bill-payment-type
+        status:
+          type: string
+          enum: [DRAFT, AWAITING_AUTHORIZATION, APPROVED, REJECTED]
+          description: Current maker-checker application status after workflow initiation.
+
+    VisionBankErrorResponse:
+      type: object
+      description: Error envelope used by the Reference Beneficiary / Reference Transfer endpoints.
+      properties:
+        statusCode: { type: integer }
+        message: { type: string }
+        error: { type: string }
+
+    # --- MOI Refund (Vision Bank) ---
+    StartMoiRefundRequest:
+      type: object
+      required: [module_slug, reference_id]
+      properties:
+        module_slug:
+          type: string
+          enum: [moi-refund]
+        reference_id:
+          type: string
+          description: Vision Bank's refund consent id.
+          example: 55555555-5555-4555-8555-555555555555
+
+    StartMoiRefundResponse:
+      type: object
+      required: [reference_id, id, module_slug, status, process_status]
+      properties:
+        reference_id:
+          type: string
+          description: The consent id from the request.
+        id:
+          type: string
+          description: AION refund request id.
+        module_slug:
+          type: string
+          example: moi-refund
+        status:
+          type: string
+          enum: [AWAITING_AUTHORIZATION, APPROVED, REJECTED]
+          description: APPROVED / REJECTED only for a single-owner company (refund executed in this call).
+        process_status:
+          type: string
+          enum: [ACTIVATION_PENDING, ACTIVATION_COMPLETED, ACTIVATION_FAILED]
+        transaction_id:
+          type: string
+          description: Vision Bank's refund id. Present only when the refund was executed in this call.
+
+    MoiRefundWorkflowStatusResponse:
+      type: object
+      required: [reference_id, module_slug, id, status, process_status, in_review]
+      properties:
+        reference_id:
+          type: string
+        module_slug:
+          type: string
+          example: moi-refund
+        id:
+          type: string
+          nullable: true
+          description: AION refund request id. null when no refund exists.
+        status:
+          type: string
+          enum: [NONE, AWAITING_AUTHORIZATION, APPROVED, REJECTED]
+          description: >
+            AWAITING_AUTHORIZATION - pending approval. APPROVED - approved and refund executed.
+            REJECTED - rejected by an approver, or refund execution failed (process_status =
+            ACTIVATION_FAILED). NONE - no refund for this reference_id.
+        process_status:
+          type: string
+          nullable: true
+          enum: [ACTIVATION_PENDING, ACTIVATION_COMPLETED, ACTIVATION_FAILED]
+        in_review:
+          type: boolean
+          description: true while the refund is pending approval.
+
+    MoiRefundExistingRequest:
+      type: object
+      description: >
+        The existing refund for the same payment. Present only for REFUND_ALREADY_IN_REVIEW /
+        REFUND_ALREADY_COMPLETED.
+      properties:
+        reference_id:
+          type: string
+          description: Consent id the existing refund was started with.
+        id:
+          type: string
+          description: AION refund request id.
+        status:
+          type: string
+          enum: [DRAFT, AWAITING_AUTHORIZATION, APPROVED]
+        process_status:
+          type: string
+          nullable: true
+          enum: [ACTIVATION_PENDING, ACTIVATION_COMPLETED]
+
+    MoiRefundErrorResponse:
+      type: object
+      description: Error envelope returned by the MOI Refund endpoints.
+      required: [statusCode, name, errors, timestamp, path]
+      properties:
+        statusCode:
+          type: integer
+        name:
+          type: string
+          description: Error code - use it to identify the error.
+        errors:
+          description: Error details. `message` holds the error text (in the language of `X-Requester-Lang`).
+          oneOf:
+            - type: array
+              items:
+                type: object
+                additionalProperties: true
+                properties:
+                  name:
+                    type: string
+                  message:
+                    type: string
+            - type: object
+              additionalProperties: true
+              properties:
+                message:
+                  type: string
+        errorMessageComment:
+          type: string
+          description: Error text in English, when available.
+        errorMessageCommentAr:
+          type: string
+          description: Error text in Arabic, when available.
+        timestamp:
+          type: string
+          format: date-time
+        path:
+          type: string
+
+    # --- User Access Profile ---
+    UserAccessResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "DCACE77B-1C27-4F09-8535-E97EB7B5D372"
+        user_name:
+          type: string
+          example: "omerCSAnew"
+        email:
+          type: string
+          format: email
+          example: "testom@gmail.com"
+        user_type:
+          type: string
+          example: "EXTERNAL"
+        is_super_admin:
+          type: boolean
+          example: true
+        roles:
+          type: array
+          items:
+            $ref: '#/components/schemas/Role'
+        modules:
+          type: array
+          items:
+            $ref: '#/components/schemas/Module'
+        permissions:
+          type: array
+          items:
+            type: string
+          example:
+            - "approve:system-access-policy"
+            - "initiate:system-access-policy"
+        status:
+          type: string
+          example: "ACTIVE"
+        has_full_access:
+          type: boolean
+          example: true
+        is_corporate_super_admin:
+          type: boolean
+          example: false
+
+    Role:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "B158928D-3C71-4CFC-AA9C-4B167CCDBC58"
+        name:
+          type: string
+          example: "CSA Full Access"
+        role_slug:
+          type: string
+          example: "CSA-full-access"
+        status:
+          type: string
+          example: "ACTIVE"
+
+    Module:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "FD6FC89F-5E10-4F66-B5B3-A977E6638DB5"
+        name:
+          type: string
+          example: "Merchant Statement"
+        name_ar:
+          type: string
+          example: "كشف التاجر"
+        slug:
+          type: string
+          example: "service-request-merchant-statement"
+        module_category:
+          type: string
+          example: "FINANCIAL"
+        is_limit_enabled:
+          type: boolean
+          example: true
+        is_authority_matrix_enabled:
+          type: boolean
+          example: true
+        applications:
+          type: array
+          items:
+            $ref: '#/components/schemas/Application'
+        permissions:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModulePermission'
+        status:
+          type: string
+          example: "ACTIVE"
+
+    Application:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "869F32D0-34DF-4B29-9AD0-F02F58E55A04"
+        name:
+          type: string
+          example: "Account Services"
+        slug:
+          type: string
+          example: "accounts"
+
+    ModulePermission:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "4CFE2AF5-829D-49C7-924B-B2FB3590BAEF"
+        module_permission_id:
+          type: string
+          format: uuid
+          example: "08964CA4-78C3-4596-A681-34A454CDE7A3"
+        record_type:
+          type: string
+          example: "approve"
+        is_restricted:
+          type: boolean
+          example: false
+
+    # --- System Audit Logs ---
+    CreateSystemAuditLogDto:
+      type: object
+      required:
+        - tenant_id
+        - audit_code
+      properties:
+        tenant_id:
+          type: string
+          description: Tenant ID
+        audit_code:
+          type: string
+          description: Headline / identifier of the event being logged
+        correlation_id:
+          type: string
+        permission_id:
+          type: string
+        session_id:
+          type: string
+        module_slug:
+          type: string
+        module_id:
+          type: string
+        module_name:
+          type: string
+        customer_id:
+          type: string
+        customer_no:
+          type: string
+        customer_account:
+          type: string
+        user_id:
+          type: string
+        user_name:
+          type: string
+        user_type:
+          type: string
+        channel_id:
+          type: string
+        channel_name:
+          type: string
+        channel_type:
+          type: string
+        branch_id:
+          type: string
+        branch_name:
+          type: string
+        activity_id:
+          type: string
+        activity:
+          type: string
+        audit_text:
+          type: string
+          description: Human-readable details of the event
+        log_content:
+          type: object
+          description: Free-form JSON payload for the event
+          additionalProperties: true
+        trans_ref_no:
+          type: string
+        pan:
+          type: string
+          nullable: true
+        ip_address:
+          type: string
+        country_code:
+          type: string
+        language_code:
+          type: string
+        remarks:
+          type: string
+        status:
+          type: string
+          description: e.g. SUCCESS / FAILED
+        response_code:
+          type: string
+        trans_node:
+          type: string
+          description: Originating service/pod name
+        created_by:
+          type: string
+
+    SystemAuditLog:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        tenant_id:
+          type: string
+        correlation_id:
+          type: string
+        user_id:
+          type: string
+        user_name:
+          type: string
+        user_type:
+          type: string
+        channel_id:
+          type: string
+        channel_name:
+          type: string
+        channel_type:
+          type: string
+        module_id:
+          type: string
+        module_name:
+          type: string
+        branch_id:
+          type: string
+        branch_name:
+          type: string
+        activity_id:
+          type: string
+        activity:
+          type: string
+        audit_code:
+          type: string
+        audit_text:
+          type: string
+        log_content:
+          type: string
+          description: JSON-stringified log content (backend serializes it on write)
+        trans_ref_no:
+          type: string
+        customer_account:
+          type: string
+        customer_no:
+          type: string
+        pan:
+          type: string
+          nullable: true
+        ip_address:
+          type: string
+        country_code:
+          type: string
+        language_code:
+          type: string
+        remarks:
+          type: string
+        status:
+          type: string
+        response_code:
+          type: string
+        created_on:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+        updated_on:
+          type: string
+          format: date-time
+          nullable: true
+        updated_by:
+          type: string
+          nullable: true
+
+    AuditErrorResponse:
+      type: object
+      description: >-
+        Shared error envelope used across the System Audit Logs service
+        (HttpExceptionFilter / ValidationExceptionFilter) — same shape for every
+        4xx/5xx from that service.
+      properties:
+        statusCode:
+          type: integer
+        name:
+          type: string
+        errors:
+          type: array
+          items:
+            type: object
+        timestamp:
+          type: string
+          format: date-time
+        path:
+          type: string
+          nullable: true
+
+    # --- Corporate Validations Orchestration ---
+    CorporateValidationsResponse:
+      type: object
+      description: >
+        Result of the eligibility and limits check. Returned with HTTP 200 whenever
+        an eligibility determination could be made — see operation description for
+        details.
+      required:
+        - eligible
+      properties:
+        eligible:
+          type: boolean
+          description: Whether the caller is eligible for the requested module_slug.
+          example: true
+        reason:
+          type: string
+          nullable: true
+          description: >
+            Reason code from the eligibility check. Eligible: APPROVER_AVAILABLE, SOLE_PROPRIETOR,
+            SINGLE_MANAGER or NO_WATHIQ_MAPPING. Not eligible: NO_INITIATE_PERMISSION or
+            NO_APPROVER_AVAILABLE. MOI refund duplicates: REFUND_ALREADY_IN_REVIEW or
+            REFUND_ALREADY_COMPLETED.
+          example: APPROVER_AVAILABLE
+        limits:
+          description: >
+            Corporate limit details for module_slug. null when eligible is false;
+            when module_slug has no limits concept (e.g. a beneficiary module); or
+            when eligible is true but the limits lookup failed (see limitsError).
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/CorporateLimits'
+        limitsError:
+          type: string
+          description: >
+            Present only when eligible is true but the best-effort limits lookup
+            failed. Does not affect the HTTP status of this response.
+          example: "Request failed with status code 422"
+        existing_request:
+          $ref: '#/components/schemas/MoiRefundExistingRequest'
+
+    CorporateLimits:
+      type: object
+      description: >
+        The corporate's limit for module_slug for today (amounts in SAR). amount_left =
+        max_limit - utilised_amount. Other fields may also be present; use the ones below.
+      properties:
+        customer_id:
+          type: string
+          description: Corporate (customer) id.
+        module_id:
+          type: string
+          description: AION module id for module_slug.
+        utilised_limit_date:
+          type: string
+          format: date
+          description: The day the utilisation applies to.
+        min_limit:
+          type: number
+        max_limit:
+          type: number
+          description: Daily limit.
+        per_transaction_limit:
+          type: number
+          description: Maximum amount per transaction.
+        transaction_limit:
+          type: number
+          description: Same value as per_transaction_limit.
+        utilised_amount:
+          type: number
+          description: Amount already used today.
+        utilised_no_transactions:
+          type: integer
+          description: Number of transactions made today.
+        amount_left:
+          type: number
+          description: Amount still available today.
+
+    CorporateValidationsErrorResponse:
+      type: object
+      description: Error envelope returned when eligibility cannot be determined.
+      properties:
+        statusCode:
+          type: integer
+        name:
+          type: string
+        errors:
+          description: Exception detail payload (shape varies by exception type).
+        timestamp:
+          type: string
+          format: date-time
+        path:
+          type: string
