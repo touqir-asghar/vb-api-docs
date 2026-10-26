@@ -730,7 +730,7 @@ paths:
                     module_slug: ips-settings-alias-management
                     request_type: LINK_ALIAS
                     status: AWAITING_AUTHORIZATION
-                    process_status: null
+                    process_status: ACTIVATION_PENDING
                 singleOwnerExecuted:
                   summary: Single owner - alias linked
                   value:
@@ -851,7 +851,7 @@ paths:
                     reference_no: AL1761462000
                     request_type: LINK_ALIAS
                     status: AWAITING_AUTHORIZATION
-                    process_status: null
+                    process_status: ACTIVATION_PENDING
                 approved:
                   summary: Approved - alias linked
                   value:
@@ -1623,9 +1623,10 @@ components:
           description: APPROVED / REJECTED only for a single-owner company (executed in this call).
         process_status:
           type: string
-          nullable: true
-          description: ACTIVATION_COMPLETED or ACTIVATION_FAILED; null until the decision is sent to Vision Bank.
-          example: ACTIVATION_COMPLETED
+          enum: [ACTIVATION_PENDING, ACTIVATION_COMPLETED, ACTIVATION_FAILED]
+          description: >
+            ACTIVATION_PENDING until the decision is sent to Vision Bank, then ACTIVATION_COMPLETED
+            (Vision Bank accepted it) or ACTIVATION_FAILED.
         alias_response:
           $ref: '#/components/schemas/AliasManagementAliasResponse'
 
@@ -1685,11 +1686,10 @@ components:
             ACTIVATION_FAILED). NONE - no request for this id.
         process_status:
           type: string
-          nullable: true
+          enum: [ACTIVATION_PENDING, ACTIVATION_COMPLETED, ACTIVATION_FAILED]
           description: >
-            null until the decision is sent to Vision Bank, then ACTIVATION_COMPLETED (Vision Bank
-            accepted it) or ACTIVATION_FAILED. Not returned when status is NONE.
-          example: ACTIVATION_COMPLETED
+            ACTIVATION_PENDING until the decision is sent to Vision Bank, then ACTIVATION_COMPLETED
+            (Vision Bank accepted it) or ACTIVATION_FAILED. Not returned when status is NONE.
 
     AliasManagementErrorResponse:
       description: Error envelope returned by the Alias Management endpoints (same shape as MOI Refund).
