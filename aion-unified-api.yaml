@@ -3,10 +3,6 @@ info:
   title: AION Unified API — Partner & Internal Integration
   version: "1.0.0"
   description: |
-    **Latest version (always up to date):**
-    [Open in Swagger Editor](https://editor.swagger.io/?url=https://raw.githubusercontent.com/touqir-asghar/vb-api-docs/main/aion-unified-api.yaml)
-    · [GitHub repository](https://github.com/touqir-asghar/vb-api-docs)
-
     Unified specification for AION's cross-service integration APIs, merged from
     previously separate documents:
 
@@ -17,6 +13,8 @@ info:
        corporate customer is eligible to initiate a money transfer and, if so, their
        current transfer limits.
     4. **MOI Refund (Vision Bank)** — start an MOI government bill refund for
+       maker-checker approval and read its status.
+    5. **Alias Management (Vision Bank)** — start an alias link / unlink request for
        maker-checker approval and read its status.
 
     ## Common request headers
@@ -65,12 +63,22 @@ info:
          execute API with APPROVED; if an approver rejects, AION sends REJECTED.
     3. **Get MOI Refund Workflow Status** — AION's current status for a refund.
 
+    ## Alias Management flow (Vision Bank)
+
+    1. **SME Validations** (`module_slug=ips-settings-alias-management`) — before the OTP: can the
+       user initiate an alias link / unlink request. No limits apply to alias management.
+    2. **Start Alias Management Workflow** — after the user's OTP is verified. Vision Bank sends
+       the alias request itself (`alias_request`: Operation, AliasType, AliasValue, AccountId,
+       AccountHolderType, and ReasonCode for an unlink) — no consent. AION stores it and starts
+       the approval workflow. The returned `id` is the workflow reference id.
+       - Single-owner company: approved straight away; once executed, the response carries
+         `alias_response`.
+       - Otherwise: `AWAITING_AUTHORIZATION`. On final approval AION calls Vision Bank's execute
+         API with APPROVED and the alias request; if an approver rejects, AION sends REJECTED.
+    3. **Get Alias Management Workflow Status** — AION's current status, by `id`.
+
   contact:
     name: AION Digital Engineering
-
-externalDocs:
-  description: Latest version of this specification (opens in Swagger Editor)
-  url: https://editor.swagger.io/?url=https://raw.githubusercontent.com/touqir-asghar/vb-api-docs/main/aion-unified-api.yaml
 
 servers:
   - url: https://{host}
@@ -93,6 +101,8 @@ tags:
     description: Bill payment service — single-call bill payment creation + workflow initiation.
   - name: Reference MOI Refund Workflow
     description: Bill payment service — MOI government bill refund workflow initiation and status.
+  - name: Reference Alias Management Workflow
+    description: Money transfer service — alias link / unlink workflow initiation and status.
   - name: User Access Profile
     description: Entitlement service — user roles, modules, and permissions lookup.
   - name: System Audit Logs
@@ -656,6 +666,230 @@ paths:
         '403':
           $ref: '#/components/responses/MoiRefundForbidden'
 
+  /api/v2/money-transfers/aliases/work-flow-process:
+    post:
+      tags: [Reference Alias Management Workflow]
+      summary: Start Alias Management Workflow
+      description: >
+        Starts the approval workflow for an alias link / unlink request. Vision Bank sends the alias
+        request itself in `alias_request` (no consent). AION stores it and starts the workflow
+        (Wathiq approvers, no OTP, no limits). The returned `id` is the workflow reference id used by
+        Get Alias Management Workflow Status. Only one request per alias (type + value + account) can
+        be in review at a time. X-Access-Token token is a trusted Forgerock token (Vision Bank) which
+        is user JWT received from API Gateway.
+      operationId: startAliasManagementWorkflow
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XAccessToken'
+        - $ref: '#/components/parameters/XCorrelationId'
+        - $ref: '#/components/parameters/XDeviceId'
+        - $ref: '#/components/parameters/XRequesterLang'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartAliasManagementRequest'
+            examples:
+              link:
+                summary: Link alias
+                value:
+                  module_slug: ips-settings-alias-management
+                  alias_request:
+                    Operation: LINK
+                    AliasType: MOBILE
+                    AliasValue: '966512345678'
+                    AccountId: SA0380000000608010167519
+                    AccountHolderType: CORPORATE
+              unlink:
+                summary: Unlink alias (ReasonCode required)
+                value:
+                  module_slug: ips-settings-alias-management
+                  alias_request:
+                    Operation: UNLINK
+                    AliasType: MOBILE
+                    AliasValue: '966512345678'
+                    AccountId: SA0380000000608010167519
+                    AccountHolderType: CORPORATE
+                    ReasonCode: NOT_SATISFIED
+                    ReasonText: Not Satisfied with the Service
+      responses:
+        '201':
+          description: Alias request created and workflow started.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartAliasManagementResponse'
+              examples:
+                awaitingApproval:
+                  summary: Needs approval
+                  value:
+                    id: E77AC0E7-A540-407E-8DEF-D92273B4FD7E
+                    reference_no: AL1761462000
+                    module_slug: ips-settings-alias-management
+                    request_type: LINK_ALIAS
+                    status: AWAITING_AUTHORIZATION
+                    process_status: null
+                singleOwnerExecuted:
+                  summary: Single owner - alias linked
+                  value:
+                    id: E77AC0E7-A540-407E-8DEF-D92273B4FD7E
+                    reference_no: AL1761462000
+                    module_slug: ips-settings-alias-management
+                    request_type: LINK_ALIAS
+                    status: APPROVED
+                    process_status: ACTIVATION_COMPLETED
+                    alias_response:
+                      result: SUCCESS
+                      alias_id: AL-E77AC0E7
+                      alias_type: MOBILE
+                      alias_value: '966512345678'
+                      registration_id: SP-B4FD7E
+                      error_code: null
+                      error_message: null
+                singleOwnerFailed:
+                  summary: Single owner - alias execution failed
+                  value:
+                    id: E77AC0E7-A540-407E-8DEF-D92273B4FD7E
+                    reference_no: AL1761462000
+                    module_slug: ips-settings-alias-management
+                    request_type: LINK_ALIAS
+                    status: REJECTED
+                    process_status: ACTIVATION_FAILED
+                    alias_response:
+                      result: FAILURE
+                      alias_id: null
+                      alias_type: null
+                      alias_value: null
+                      registration_id: null
+                      error_code: ALIAS_ALREADY_LINKED
+                      error_message: Alias is already linked to an account
+        '400':
+          description: module_slug is not ips-settings-alias-management, or the user is not linked to a customer.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AliasManagementErrorResponse'
+        '401':
+          description: Missing or invalid user token.
+        '403':
+          $ref: '#/components/responses/AliasManagementForbidden'
+        '409':
+          description: The same alias (type + value + account) is already in review for this company.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AliasManagementErrorResponse'
+              example:
+                statusCode: 409
+                name: ConflictException
+                errors:
+                  statusCode: 409
+                  message: A request for this MOBILE alias is already pending approval (id E77AC0E7-A540-407E-8DEF-D92273B4FD7E)
+                  error: Conflict
+                timestamp: '2026-10-26T09:00:00.000Z'
+                path: /rubix/api/v2/money-transfers/aliases/work-flow-process
+        '422':
+          description: >
+            The request body is invalid (name = INPUT_VALIDATION_ERROR) — e.g. a missing field, an
+            unknown Operation / AliasType, or an UNLINK without ReasonCode.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AliasManagementErrorResponse'
+              examples:
+                unlinkWithoutReason:
+                  summary: UNLINK without ReasonCode
+                  value:
+                    statusCode: 422
+                    name: INPUT_VALIDATION_ERROR
+                    errors:
+                      - name: REASONCODE_ISNOTEMPTY
+                        message: ReasonCode should not be empty
+                        developerMessage: ReasonCode should not be empty
+                        field: alias_request.ReasonCode
+                    timestamp: '2026-10-26T09:00:00.000Z'
+                    path: /rubix/api/v2/money-transfers/aliases/work-flow-process
+
+  /api/v2/money-transfers/aliases/{id}/workflow-status:
+    get:
+      tags: [Reference Alias Management Workflow]
+      summary: Get Alias Management Workflow Status
+      description: >
+        AION's current status for an alias request, by the `id` returned by Start Alias Management
+        Workflow, for the user's company. If no request exists, the response is HTTP 200 with status
+        NONE.
+      operationId: getAliasManagementWorkflowStatus
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XAccessToken'
+        - $ref: '#/components/parameters/XCorrelationId'
+        - $ref: '#/components/parameters/XDeviceId'
+        - $ref: '#/components/parameters/XRequesterLang'
+        - name: id
+          in: path
+          required: true
+          description: The workflow reference id (`id`) returned by Start Alias Management Workflow.
+          schema:
+            type: string
+          example: E77AC0E7-A540-407E-8DEF-D92273B4FD7E
+      responses:
+        '200':
+          description: Current status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AliasManagementWorkflowStatusResponse'
+              examples:
+                awaitingApproval:
+                  summary: Pending approval
+                  value:
+                    module_slug: ips-settings-alias-management
+                    id: E77AC0E7-A540-407E-8DEF-D92273B4FD7E
+                    reference_no: AL1761462000
+                    request_type: LINK_ALIAS
+                    status: AWAITING_AUTHORIZATION
+                    process_status: null
+                approved:
+                  summary: Approved - alias linked
+                  value:
+                    module_slug: ips-settings-alias-management
+                    id: E77AC0E7-A540-407E-8DEF-D92273B4FD7E
+                    reference_no: AL1761462000
+                    request_type: LINK_ALIAS
+                    status: APPROVED
+                    process_status: ACTIVATION_COMPLETED
+                rejectedByApprover:
+                  summary: Rejected by an approver
+                  value:
+                    module_slug: ips-settings-alias-management
+                    id: E77AC0E7-A540-407E-8DEF-D92273B4FD7E
+                    reference_no: AL1761462000
+                    request_type: UNLINK_ALIAS
+                    status: REJECTED
+                    process_status: ACTIVATION_COMPLETED
+                executionFailed:
+                  summary: Approved, but the link / unlink failed on Vision Bank
+                  value:
+                    module_slug: ips-settings-alias-management
+                    id: E77AC0E7-A540-407E-8DEF-D92273B4FD7E
+                    reference_no: AL1761462000
+                    request_type: LINK_ALIAS
+                    status: REJECTED
+                    process_status: ACTIVATION_FAILED
+                notFound:
+                  summary: No request for this id
+                  value:
+                    module_slug: ips-settings-alias-management
+                    id: E77AC0E7-A540-407E-8DEF-D92273B4FD7E
+                    status: NONE
+        '401':
+          description: Missing or invalid user token.
+        '403':
+          $ref: '#/components/responses/AliasManagementForbidden'
+
   /v1/user/access-profile-context:
     get:
       tags: [User Access Profile]
@@ -1032,6 +1266,21 @@ components:
         default: en
 
   responses:
+    AliasManagementForbidden:
+      description: The user is not allowed to perform this action on `ips-settings-alias-management`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AliasManagementErrorResponse'
+          example:
+            statusCode: 403
+            name: ForbiddenException
+            errors:
+              statusCode: 403
+              message: User does not have create/initiate permission on module [ips-settings-alias-management]
+              error: Forbidden
+            timestamp: '2026-10-26T09:00:00.000Z'
+            path: /rubix/api/v2/money-transfers/aliases/work-flow-process
     MoiRefundForbidden:
       description: The user is not allowed to perform this action on `moi-refund`.
       content:
@@ -1307,6 +1556,145 @@ components:
           type: string
           nullable: true
           enum: [ACTIVATION_PENDING, ACTIVATION_COMPLETED]
+
+    # --- Alias Management (Vision Bank) ---
+    StartAliasManagementRequest:
+      type: object
+      required: [module_slug, alias_request]
+      properties:
+        module_slug:
+          type: string
+          enum: [ips-settings-alias-management]
+        alias_request:
+          $ref: '#/components/schemas/AliasManagementRequest'
+
+    AliasManagementRequest:
+      type: object
+      description: >
+        The alias link / unlink request (HLD "Alias Management Workflow"). Stored as sent and passed
+        back to Vision Bank's execute API on approval.
+      required: [Operation, AliasType, AliasValue, AccountId, AccountHolderType]
+      properties:
+        Operation:
+          type: string
+          enum: [LINK, UNLINK]
+        AliasType:
+          type: string
+          enum: [MOBILE, EMAIL, NATIONAL_ID, CR_NUMBER]
+        AliasValue:
+          type: string
+          example: '966512345678'
+        AccountId:
+          type: string
+          description: Account the alias is linked to / unlinked from.
+          example: SA0380000000608010167519
+        AccountHolderType:
+          type: string
+          example: CORPORATE
+        ReasonCode:
+          type: string
+          description: Unlink reason code. Required when Operation is UNLINK.
+          example: NOT_SATISFIED
+        ReasonText:
+          type: string
+          description: Unlink reason text, shown to approvers on the request details.
+          example: Not Satisfied with the Service
+
+    StartAliasManagementResponse:
+      type: object
+      required: [id, reference_no, module_slug, request_type, status, process_status]
+      properties:
+        id:
+          type: string
+          description: AION alias request id — the workflow reference id used by Get Alias Management Workflow Status.
+        reference_no:
+          type: string
+          description: AION reference number shown in the Request Pool.
+          example: AL1761462000
+        module_slug:
+          type: string
+          example: ips-settings-alias-management
+        request_type:
+          type: string
+          enum: [LINK_ALIAS, UNLINK_ALIAS]
+        status:
+          type: string
+          enum: [AWAITING_AUTHORIZATION, APPROVED, REJECTED]
+          description: APPROVED / REJECTED only for a single-owner company (executed in this call).
+        process_status:
+          type: string
+          nullable: true
+          description: ACTIVATION_COMPLETED or ACTIVATION_FAILED; null until the decision is sent to Vision Bank.
+          example: ACTIVATION_COMPLETED
+        alias_response:
+          $ref: '#/components/schemas/AliasManagementAliasResponse'
+
+    AliasManagementAliasResponse:
+      type: object
+      description: >
+        Vision Bank's execute result. Present only once the decision has been sent (single-owner
+        company).
+      properties:
+        result:
+          type: string
+          nullable: true
+          example: SUCCESS
+        alias_id:
+          type: string
+          nullable: true
+        alias_type:
+          type: string
+          nullable: true
+        alias_value:
+          type: string
+          nullable: true
+        registration_id:
+          type: string
+          nullable: true
+        error_code:
+          type: string
+          nullable: true
+          example: ALIAS_ALREADY_LINKED
+        error_message:
+          type: string
+          nullable: true
+
+    AliasManagementWorkflowStatusResponse:
+      type: object
+      required: [module_slug, id, status]
+      properties:
+        module_slug:
+          type: string
+          example: ips-settings-alias-management
+        id:
+          type: string
+          description: The id from the request path.
+        reference_no:
+          type: string
+          description: Not returned when status is NONE.
+        request_type:
+          type: string
+          enum: [LINK_ALIAS, UNLINK_ALIAS]
+          description: Not returned when status is NONE.
+        status:
+          type: string
+          enum: [NONE, AWAITING_AUTHORIZATION, APPROVED, REJECTED]
+          description: >
+            AWAITING_AUTHORIZATION - pending approval. APPROVED - approved and executed. REJECTED -
+            rejected by an approver, or the link / unlink failed on Vision Bank (process_status =
+            ACTIVATION_FAILED). NONE - no request for this id.
+        process_status:
+          type: string
+          nullable: true
+          description: >
+            null until the decision is sent to Vision Bank, then ACTIVATION_COMPLETED (Vision Bank
+            accepted it) or ACTIVATION_FAILED. Not returned when status is NONE.
+          example: ACTIVATION_COMPLETED
+
+    AliasManagementErrorResponse:
+      description: Error envelope returned by the Alias Management endpoints (same shape as MOI Refund).
+      allOf:
+        - $ref: '#/components/schemas/MoiRefundErrorResponse'
 
     MoiRefundErrorResponse:
       type: object
