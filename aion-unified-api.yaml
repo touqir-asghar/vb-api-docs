@@ -52,16 +52,24 @@ info:
 
     ## MOI Refund flow (Vision Bank)
 
+    `reference_id` is the `EndToEndIdentification` of the original MOI payment.
+
     1. **SME Validations** (`module_slug=moi-refund`) — when the user clicks *Request Refund*:
        can the user initiate a refund, and whether a refund for the same payment already exists
        (pass `end_to_end_identification`). No corporate or user limits apply to MOI refunds.
-    2. **Start MOI Refund Workflow** — after the consent is created and the user's OTP is
-       verified. AION fetches the consent by `reference_id` and starts the approval workflow.
+    2. **Start MOI Refund Workflow** — after the user's OTP is verified. AION fetches the
+       original payment's details by `reference_id` and starts the approval workflow.
        - Single-owner company: the refund is executed during this call; the response carries
          the final status.
        - Otherwise: `AWAITING_AUTHORIZATION`. On final approval AION calls Vision Bank's
          execute API with APPROVED; if an approver rejects, AION sends REJECTED.
-    3. **Get MOI Refund Workflow Status** — AION's current status for a refund.
+    3. **Get MOI Refund Workflow Status** — AION's current status for the latest refund of a
+       payment.
+
+    **One refund at a time per payment (BRD UC-01 BR-10):** a new refund is blocked while one
+    for the same payment is pending approval or approved. A rejected refund, or one whose
+    execution failed, is never resubmitted — the user starts a new request with the same
+    `reference_id`, which creates a new refund.
 
     ## Alias Management flow (Vision Bank)
 
@@ -476,10 +484,12 @@ paths:
       tags: [Reference MOI Refund Workflow]
       summary: Start MOI Refund Workflow
       description: >
-        Starts the approval workflow for an MOI refund consent created by Vision Bank. AION fetches
-        the consent by reference_id and starts the workflow. A reference_id can start only one
-        refund. X-Access-Token token is a trusted Forgerock token (Vision Bank) which is user JWT
-        received from API Gateway.
+        Starts the approval workflow for an MOI refund. reference_id is the EndToEndIdentification
+        of the original MOI payment; AION fetches the payment's details by it and starts the
+        workflow. Blocked (409) while a refund for the
+        same payment is pending approval or approved (BR-10); after a rejected or failed refund the
+        same reference_id starts a new refund. X-Access-Token token is a trusted Forgerock token
+        (Vision Bank) which is user JWT received from API Gateway.
       operationId: startMoiRefundWorkflow
       security:
         - bearerAuth: []
@@ -496,7 +506,7 @@ paths:
               $ref: '#/components/schemas/StartMoiRefundRequest'
             example:
               module_slug: moi-refund
-              reference_id: 55555555-5555-4555-8555-555555555555
+              reference_id: 6b721bb0f97046bcbcb00bd55711d176
       responses:
         '201':
           description: Refund request created and workflow started.
@@ -508,7 +518,7 @@ paths:
                 awaitingApproval:
                   summary: Needs approval
                   value:
-                    reference_id: 55555555-5555-4555-8555-555555555555
+                    reference_id: 6b721bb0f97046bcbcb00bd55711d176
                     id: 8FF53AF0-D149-4B3B-81C1-2455FC08ED2B
                     module_slug: moi-refund
                     status: AWAITING_AUTHORIZATION
@@ -516,16 +526,16 @@ paths:
                 singleOwnerExecuted:
                   summary: Single owner - refund executed
                   value:
-                    reference_id: 55555555-5555-4555-8555-555555555555
+                    reference_id: 6b721bb0f97046bcbcb00bd55711d176
                     id: 8FF53AF0-D149-4B3B-81C1-2455FC08ED2B
                     module_slug: moi-refund
                     status: APPROVED
                     process_status: ACTIVATION_COMPLETED
-                    transaction_id: RF-55555555
+                    transaction_id: VIIOSARI20261025135708336
                 singleOwnerFailed:
                   summary: Single owner - refund execution failed
                   value:
-                    reference_id: 55555555-5555-4555-8555-555555555555
+                    reference_id: 6b721bb0f97046bcbcb00bd55711d176
                     id: 8FF53AF0-D149-4B3B-81C1-2455FC08ED2B
                     module_slug: moi-refund
                     status: REJECTED
@@ -534,34 +544,41 @@ paths:
           description: Missing or invalid user token.
         '403':
           $ref: '#/components/responses/MoiRefundForbidden'
-        '409':
-          description: >
-            The reference_id was already used, or another refund for the same payment is pending
-            approval or approved. errors.message says which.
+        '404':
+          description: Vision Bank has no MOI payment for this reference_id.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/MoiRefundErrorResponse'
               examples:
-                referenceAlreadyUsed:
-                  summary: Same reference_id sent again
+                paymentNotFound:
+                  summary: Payment not found
                   value:
-                    statusCode: 409
-                    name: ConflictException
+                    statusCode: 404
+                    name: NotFoundException
                     errors:
-                      statusCode: 409
-                      message: This refund request is already pending approval (reference_id 55555555-5555-4555-8555-555555555555)
-                      error: Conflict
+                      statusCode: 404
+                      message: MOI payment not found
+                      error: Not Found
                     timestamp: '2026-10-25T09:00:00.000Z'
                     path: /rubix/api/v2/bill-payments/refunds/work-flow-process
+        '409':
+          description: >
+            A refund for the same payment is already pending approval or approved (BR-10). After a
+            rejected or failed refund, the same reference_id starts a new refund.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MoiRefundErrorResponse'
+              examples:
                 paymentAlreadyRefunding:
-                  summary: Another refund for the same payment exists
+                  summary: A refund for the same payment is pending approval
                   value:
                     statusCode: 409
                     name: ConflictException
                     errors:
                       statusCode: 409
-                      message: A refund for this payment is already pending approval (reference_id 44444444-4444-4444-8444-444444444444)
+                      message: A refund for this payment is already pending approval (reference_id 6b721bb0f97046bcbcb00bd55711d176)
                       error: Conflict
                     timestamp: '2026-10-25T09:00:00.000Z'
                     path: /rubix/api/v2/bill-payments/refunds/work-flow-process
@@ -591,8 +608,10 @@ paths:
       tags: [Reference MOI Refund Workflow]
       summary: Get MOI Refund Workflow Status
       description: >
-        AION's current status for the refund started with this reference_id, for the user's company.
-        If no refund exists, the response is HTTP 200 with status NONE.
+        AION's current status for the latest refund started with this reference_id (the original
+        payment's EndToEndIdentification), for the user's company. A payment can have several
+        refunds (a new one after a rejected or failed refund); the latest is returned. If no refund
+        exists, the response is HTTP 200 with status NONE.
       operationId: getMoiRefundWorkflowStatus
       security:
         - bearerAuth: []
@@ -604,10 +623,10 @@ paths:
         - name: reference_id
           in: path
           required: true
-          description: The consent id the refund was started with.
+          description: EndToEndIdentification of the original MOI payment (the reference_id the refund was started with).
           schema:
             type: string
-          example: 55555555-5555-4555-8555-555555555555
+          example: 6b721bb0f97046bcbcb00bd55711d176
       responses:
         '200':
           description: Current status.
@@ -619,7 +638,7 @@ paths:
                 awaitingApproval:
                   summary: Pending approval
                   value:
-                    reference_id: 55555555-5555-4555-8555-555555555555
+                    reference_id: 6b721bb0f97046bcbcb00bd55711d176
                     module_slug: moi-refund
                     id: 8FF53AF0-D149-4B3B-81C1-2455FC08ED2B
                     status: AWAITING_AUTHORIZATION
@@ -628,7 +647,7 @@ paths:
                 approved:
                   summary: Approved - refund executed
                   value:
-                    reference_id: 55555555-5555-4555-8555-555555555555
+                    reference_id: 6b721bb0f97046bcbcb00bd55711d176
                     module_slug: moi-refund
                     id: 8FF53AF0-D149-4B3B-81C1-2455FC08ED2B
                     status: APPROVED
@@ -637,7 +656,7 @@ paths:
                 rejectedByApprover:
                   summary: Rejected by an approver
                   value:
-                    reference_id: 55555555-5555-4555-8555-555555555555
+                    reference_id: 6b721bb0f97046bcbcb00bd55711d176
                     module_slug: moi-refund
                     id: 8FF53AF0-D149-4B3B-81C1-2455FC08ED2B
                     status: REJECTED
@@ -646,7 +665,7 @@ paths:
                 executionFailed:
                   summary: Approved, but refund execution failed
                   value:
-                    reference_id: 55555555-5555-4555-8555-555555555555
+                    reference_id: 6b721bb0f97046bcbcb00bd55711d176
                     module_slug: moi-refund
                     id: 8FF53AF0-D149-4B3B-81C1-2455FC08ED2B
                     status: REJECTED
@@ -655,7 +674,7 @@ paths:
                 notFound:
                   summary: No refund for this reference_id
                   value:
-                    reference_id: 55555555-5555-4555-8555-555555555555
+                    reference_id: 6b721bb0f97046bcbcb00bd55711d176
                     module_slug: moi-refund
                     id: null
                     status: NONE
@@ -1132,11 +1151,12 @@ paths:
           in: query
           required: false
           description: >
-            MOI refund only - end-to-end id of the original MOI payment. Enables the duplicate
-            refund check.
+            MOI refund only - end-to-end id of the original MOI payment (the same value sent as
+            reference_id). Enables the duplicate refund check (BR-10): eligible=false while a refund
+            for it is pending approval or approved; a rejected or failed refund does not block.
           schema:
             type: string
-          example: E2E-20261009-123456
+          example: 6b721bb0f97046bcbcb00bd55711d176
       responses:
         '200':
           description: >
@@ -1195,7 +1215,7 @@ paths:
                     reason: REFUND_ALREADY_IN_REVIEW
                     limits: null
                     existing_request:
-                      reference_id: 55555555-5555-4555-8555-555555555555
+                      reference_id: 6b721bb0f97046bcbcb00bd55711d176
                       id: 8FF53AF0-D149-4B3B-81C1-2455FC08ED2B
                       status: AWAITING_AUTHORIZATION
                       process_status: ACTIVATION_PENDING
@@ -1206,7 +1226,7 @@ paths:
                     reason: REFUND_ALREADY_COMPLETED
                     limits: null
                     existing_request:
-                      reference_id: 55555555-5555-4555-8555-555555555555
+                      reference_id: 6b721bb0f97046bcbcb00bd55711d176
                       id: 8FF53AF0-D149-4B3B-81C1-2455FC08ED2B
                       status: APPROVED
                       process_status: ACTIVATION_COMPLETED
@@ -1482,8 +1502,8 @@ components:
           enum: [moi-refund]
         reference_id:
           type: string
-          description: Vision Bank's refund consent id.
-          example: 55555555-5555-4555-8555-555555555555
+          description: EndToEndIdentification of the original MOI payment.
+          example: 6b721bb0f97046bcbcb00bd55711d176
 
     StartMoiRefundResponse:
       type: object
@@ -1491,7 +1511,7 @@ components:
       properties:
         reference_id:
           type: string
-          description: The consent id from the request.
+          description: The reference_id from the request (the payment's EndToEndIdentification).
         id:
           type: string
           description: AION refund request id.
@@ -1507,7 +1527,7 @@ components:
           enum: [ACTIVATION_PENDING, ACTIVATION_COMPLETED, ACTIVATION_FAILED]
         transaction_id:
           type: string
-          description: Vision Bank's refund id. Present only when the refund was executed in this call.
+          description: Vision Bank's refund transactionId. Present only when the refund was executed in this call.
 
     MoiRefundWorkflowStatusResponse:
       type: object
@@ -1545,7 +1565,7 @@ components:
       properties:
         reference_id:
           type: string
-          description: Consent id the existing refund was started with.
+          description: reference_id the existing refund was started with (the payment's EndToEndIdentification).
         id:
           type: string
           description: AION refund request id.
