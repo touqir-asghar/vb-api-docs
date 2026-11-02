@@ -725,8 +725,13 @@ paths:
                     Operation: LINK
                     AliasType: MOBILE
                     AliasValue: '966512345678'
-                    AccountId: SA0380000000608010167519
+                    AccountId: '12344566778'
                     AccountHolderType: CORPORATE
+                    SchemeName: SA.VB.Paym
+                    PartyId: '300000050326932'
+                    CompanyPartyId: '300000050328668'
+                    UserId: 1a8e44b-2a42-4436-a669-c74af8a36089
+                    PreferredLanguage: en
               unlink:
                 summary: Unlink alias (ReasonCode required)
                 value:
@@ -735,10 +740,15 @@ paths:
                     Operation: UNLINK
                     AliasType: MOBILE
                     AliasValue: '966512345678'
-                    AccountId: SA0380000000608010167519
+                    AccountId: '12344566778'
                     AccountHolderType: CORPORATE
                     ReasonCode: NOT_SATISFIED
-                    ReasonText: Not Satisfied with the Service
+                    ReasonText: Not satisfied with the service
+                    SchemeName: SA.VB.Paym
+                    PartyId: '300000050326932'
+                    CompanyPartyId: '300000050328668'
+                    UserId: 1a8e44b-2a42-4436-a669-c74af8a36089
+                    PreferredLanguage: en
       responses:
         '201':
           description: Alias request created and workflow started.
@@ -961,12 +971,6 @@ paths:
           in: header
           required: true
           description: Basic-auth service token (Base64 of key:secret), shared by AION per environment.
-          schema:
-            type: string
-        - name: X-Tenant-ID
-          in: header
-          required: true
-          description: AION tenant id.
           schema:
             type: string
         - $ref: '#/components/parameters/XCorrelationId'
@@ -1735,9 +1739,9 @@ components:
     AliasManagementRequest:
       type: object
       description: >
-        The alias link / unlink request (HLD "Alias Management Workflow"). Stored as sent and passed
-        back to Vision Bank's execute API on approval.
-      required: [Operation, AliasType, AliasValue, AccountId, AccountHolderType]
+        The alias link / unlink request. Stored as sent and passed back unchanged to Vision Bank's
+        execute API as AliasRequest.
+      required: [Operation, AliasType, AliasValue, AccountId, AccountHolderType, SchemeName, PartyId, CompanyPartyId]
       properties:
         Operation:
           type: string
@@ -1762,7 +1766,27 @@ components:
         ReasonText:
           type: string
           description: Unlink reason text, shown to approvers on the request details.
-          example: Not Satisfied with the Service
+          example: Not satisfied with the service
+        SchemeName:
+          type: string
+          description: Passed back on execute.
+          example: SA.VB.Paym
+        PartyId:
+          type: string
+          description: Passed back on execute.
+          example: '300000050326932'
+        CompanyPartyId:
+          type: string
+          description: Passed back on execute.
+          example: '300000050328668'
+        UserId:
+          type: string
+          description: Passed back on execute.
+          example: 1a8e44b-2a42-4436-a669-c74af8a36089
+        PreferredLanguage:
+          type: string
+          description: Passed back on execute.
+          example: en
 
     StartAliasManagementResponse:
       type: object
