@@ -15,7 +15,7 @@ info:
     4. **MOI Refund (Vision Bank)** — start an MOI government bill refund for
        maker-checker approval and read its status.
     5. **Alias Management (Vision Bank)** — start an alias link / unlink request for
-       maker-checker approval and read its status.
+       maker-checker approval, read its status, and send the final unlink result.
 
     ## Common request headers
 
@@ -83,7 +83,13 @@ info:
          `alias_response`.
        - Otherwise: `AWAITING_AUTHORIZATION`. On final approval AION calls Vision Bank's execute
          API with APPROVED and the alias request; if an approver rejects, AION sends REJECTED.
+       - Link: done when Vision Bank returns SUCCESS (process_status ACTIVATION_COMPLETED).
+       - Unlink: async on Vision Bank's side. SUCCESS on execute only means it was sent to PH — the
+         request is APPROVED and stays process_status ACTIVATION_PENDING until step 4.
     3. **Get Alias Management Workflow Status** — AION's current status, by `id`.
+    4. **Update Alias Unlink Status** (unlink only) — once PH responds, Vision Bank sends the final
+       result (APPROVED / REJECTED) by `id`. Service-to-service call: basic-auth X-Access-Token, no
+       user token.
 
   contact:
     name: AION Digital Engineering
@@ -110,7 +116,7 @@ tags:
   - name: Reference MOI Refund Workflow
     description: Bill payment service — MOI government bill refund workflow initiation and status.
   - name: Reference Alias Management Workflow
-    description: Money transfer service — alias link / unlink workflow initiation and status.
+    description: Money transfer service — alias link / unlink workflow initiation, status and unlink status update.
   - name: User Access Profile
     description: Entitlement service — user roles, modules, and permissions lookup.
   - name: System Audit Logs
@@ -898,6 +904,24 @@ paths:
                     request_type: LINK_ALIAS
                     status: REJECTED
                     process_status: ACTIVATION_FAILED
+                unlinkAwaitingResult:
+                  summary: Unlink approved, waiting for the PH result (Update Alias Unlink Status)
+                  value:
+                    module_slug: ips-settings-alias-management
+                    id: E77AC0E7-A540-407E-8DEF-D92273B4FD7E
+                    reference_no: AL1761462000
+                    request_type: UNLINK_ALIAS
+                    status: APPROVED
+                    process_status: ACTIVATION_PENDING
+                unlinkRejectedByPh:
+                  summary: Unlink approved, but PH rejected it (Update Alias Unlink Status REJECTED)
+                  value:
+                    module_slug: ips-settings-alias-management
+                    id: E77AC0E7-A540-407E-8DEF-D92273B4FD7E
+                    reference_no: AL1761462000
+                    request_type: UNLINK_ALIAS
+                    status: APPROVED
+                    process_status: ACTIVATION_FAILED
                 notFound:
                   summary: No request for this id
                   value:
@@ -908,6 +932,126 @@ paths:
           description: Missing or invalid user token.
         '403':
           $ref: '#/components/responses/AliasManagementForbidden'
+
+  /api/v2/money-transfers/aliases/{id}/status-update:
+    put:
+      tags: [Reference Alias Management Workflow]
+      summary: Update Alias Unlink Status
+      description: >
+        Called by Vision Bank once PH sends the final result of an alias **unlink** (unlink is async on
+        Vision Bank's side; link is final on execute and never uses this API). Only for an UNLINK that
+        AION has approved and is still process_status ACTIVATION_PENDING.
+
+
+        - APPROVED → process_status ACTIVATION_COMPLETED.
+
+        - REJECTED → process_status ACTIVATION_FAILED; ErrorCode / ErrorMessage are saved and shown on
+        the request.
+
+        The request status stays APPROVED. Sending the same status again returns the saved status
+        (HTTP 200); a different status after the final one returns 409.
+
+
+        Service-to-service call: no user token. Authenticate with the basic-auth service token in
+        X-Access-Token.
+      operationId: updateAliasUnlinkStatus
+      security: []
+      parameters:
+        - name: X-Access-Token
+          in: header
+          required: true
+          description: Basic-auth service token (Base64 of key:secret), shared by AION per environment.
+          schema:
+            type: string
+        - name: X-Tenant-ID
+          in: header
+          required: true
+          description: AION tenant id.
+          schema:
+            type: string
+        - $ref: '#/components/parameters/XCorrelationId'
+        - name: id
+          in: path
+          required: true
+          description: >
+            The workflow reference id (`id`) returned by Start Alias Management Workflow and sent to
+            Vision Bank as WorkflowReferenceId in execute.
+          schema:
+            type: string
+          example: E77AC0E7-A540-407E-8DEF-D92273B4FD7E
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AliasUnlinkStatusUpdateRequest'
+            examples:
+              approved:
+                summary: Unlink approved by PH
+                value:
+                  Status: APPROVED
+                  AliasType: MOBILE
+                  AliasValue: '966512345678'
+              rejected:
+                summary: Unlink rejected by PH
+                value:
+                  Status: REJECTED
+                  AliasType: MOBILE
+                  AliasValue: '966512345678'
+                  ErrorCode: VB.OBIE.Resource.NotFound
+                  ErrorMessage: This alias not linked to an account
+      responses:
+        '200':
+          description: Status saved (or already saved with the same status).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AliasUnlinkStatusUpdateResponse'
+              examples:
+                approved:
+                  summary: Unlink completed
+                  value:
+                    id: E77AC0E7-A540-407E-8DEF-D92273B4FD7E
+                    status: APPROVED
+                    process_status: ACTIVATION_COMPLETED
+                rejected:
+                  summary: Unlink failed on PH
+                  value:
+                    id: E77AC0E7-A540-407E-8DEF-D92273B4FD7E
+                    status: APPROVED
+                    process_status: ACTIVATION_FAILED
+        '400':
+          description: AliasType / AliasValue do not match the alias request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AliasManagementErrorResponse'
+        '403':
+          description: Missing or invalid X-Access-Token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AliasManagementErrorResponse'
+        '404':
+          description: >
+            No unlink awaiting its result for this id — not found, not an UNLINK, not approved yet, or
+            not waiting for a PH result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AliasManagementErrorResponse'
+        '409':
+          description: A different final status was already saved for this request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AliasManagementErrorResponse'
+        '422':
+          description: Invalid body — Status is not APPROVED / REJECTED, or AliasType / AliasValue is missing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AliasManagementErrorResponse'
 
   /v1/user/access-profile-context:
     get:
@@ -1646,7 +1790,8 @@ components:
           enum: [ACTIVATION_PENDING, ACTIVATION_COMPLETED, ACTIVATION_FAILED]
           description: >
             ACTIVATION_PENDING until the decision is sent to Vision Bank, then ACTIVATION_COMPLETED
-            (Vision Bank accepted it) or ACTIVATION_FAILED.
+            (Vision Bank accepted it) or ACTIVATION_FAILED. An approved unlink stays ACTIVATION_PENDING
+            until Vision Bank sends the PH result (Update Alias Unlink Status).
         alias_response:
           $ref: '#/components/schemas/AliasManagementAliasResponse'
 
@@ -1701,15 +1846,60 @@ components:
           type: string
           enum: [NONE, AWAITING_AUTHORIZATION, APPROVED, REJECTED]
           description: >
-            AWAITING_AUTHORIZATION - pending approval. APPROVED - approved and executed. REJECTED -
-            rejected by an approver, or the link / unlink failed on Vision Bank (process_status =
-            ACTIVATION_FAILED). NONE - no request for this id.
+            AWAITING_AUTHORIZATION - pending approval. APPROVED - approved and executed (for an unlink,
+            check process_status for the PH result). REJECTED - rejected by an approver, or the link /
+            unlink failed on Vision Bank's execute (process_status = ACTIVATION_FAILED). NONE - no
+            request for this id.
         process_status:
           type: string
           enum: [ACTIVATION_PENDING, ACTIVATION_COMPLETED, ACTIVATION_FAILED]
           description: >
             ACTIVATION_PENDING until the decision is sent to Vision Bank, then ACTIVATION_COMPLETED
-            (Vision Bank accepted it) or ACTIVATION_FAILED. Not returned when status is NONE.
+            (Vision Bank accepted it) or ACTIVATION_FAILED. An approved unlink stays ACTIVATION_PENDING
+            until Vision Bank sends the PH result (Update Alias Unlink Status): APPROVED →
+            ACTIVATION_COMPLETED, REJECTED → ACTIVATION_FAILED. Not returned when status is NONE.
+
+    AliasUnlinkStatusUpdateRequest:
+      type: object
+      required: [Status, AliasType, AliasValue]
+      properties:
+        Status:
+          type: string
+          enum: [APPROVED, REJECTED]
+          description: Final unlink result from PH.
+          example: APPROVED
+        AliasType:
+          type: string
+          description: Must match the alias type of the request.
+          example: MOBILE
+        AliasValue:
+          type: string
+          description: Must match the alias value of the request.
+          example: '966512345678'
+        ErrorCode:
+          type: string
+          description: Error code when Status is REJECTED.
+          example: VB.OBIE.Resource.NotFound
+        ErrorMessage:
+          type: string
+          description: Error message when Status is REJECTED.
+          example: This alias not linked to an account
+
+    AliasUnlinkStatusUpdateResponse:
+      type: object
+      required: [id, status, process_status]
+      properties:
+        id:
+          type: string
+          description: AION alias request id (the id from the request path).
+        status:
+          type: string
+          description: Request status — stays APPROVED.
+          example: APPROVED
+        process_status:
+          type: string
+          enum: [ACTIVATION_COMPLETED, ACTIVATION_FAILED]
+          description: ACTIVATION_COMPLETED when PH approved the unlink, ACTIVATION_FAILED when it rejected it.
 
     AliasManagementErrorResponse:
       description: Error envelope returned by the Alias Management endpoints (same shape as MOI Refund).
