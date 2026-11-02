@@ -77,12 +77,16 @@ info:
        user initiate an alias link / unlink request. No limits apply to alias management.
     2. **Start Alias Management Workflow** — after the user's OTP is verified. Vision Bank sends
        the alias request itself (`alias_request`: Operation, AliasType, AliasValue, AccountId,
-       AccountHolderType, and ReasonCode for an unlink) — no consent. AION stores it and starts
-       the approval workflow. The returned `id` is the workflow reference id.
+       AccountHolderType, SchemeName, PartyId, CompanyPartyId, UserId, PreferredLanguage, and
+       ReasonCode / ReasonText for an unlink) — no consent. AION stores it and starts the approval
+       workflow. The returned `id` is the workflow reference id.
        - Single-owner company: approved straight away; once executed, the response carries
          `alias_response`.
        - Otherwise: `AWAITING_AUTHORIZATION`. On final approval AION calls Vision Bank's execute
-         API with APPROVED and the alias request; if an approver rejects, AION sends REJECTED.
+         API (POST /protected/v1/sme/aliases/aion/execute) with `{ Id, ReferenceNo, ModuleSlug,
+         Decision: APPROVED, AliasRequest }`, where `Id` is the workflow reference id and
+         `AliasRequest` is the `alias_request` exactly as Vision Bank sent it. If an approver
+         rejects, AION sends the same body with Decision REJECTED.
        - Link: done when Vision Bank returns SUCCESS (process_status ACTIVATION_COMPLETED).
        - Unlink: async on Vision Bank's side. SUCCESS on execute only means it was sent to PH — the
          request is APPROVED and stays process_status ACTIVATION_PENDING until step 4.
@@ -777,10 +781,27 @@ paths:
                     process_status: ACTIVATION_COMPLETED
                     alias_response:
                       result: SUCCESS
-                      alias_id: AL-E77AC0E7
+                      alias_id: null
                       alias_type: MOBILE
                       alias_value: '966512345678'
-                      registration_id: SP-B4FD7E
+                      registration_id: 9cbce49c-7062-46dc-a9f9-05967d7970ee
+                      error_code: null
+                      error_message: null
+                singleOwnerUnlinkSent:
+                  summary: Single owner - unlink sent to PH, waiting for Update Alias Unlink Status
+                  value:
+                    id: E77AC0E7-A540-407E-8DEF-D92273B4FD7E
+                    reference_no: AL1761462000
+                    module_slug: ips-settings-alias-management
+                    request_type: UNLINK_ALIAS
+                    status: APPROVED
+                    process_status: ACTIVATION_PENDING
+                    alias_response:
+                      result: SUCCESS
+                      alias_id: null
+                      alias_type: MOBILE
+                      alias_value: '966512345678'
+                      registration_id: null
                       error_code: null
                       error_message: null
                 singleOwnerFailed:
@@ -795,11 +816,11 @@ paths:
                     alias_response:
                       result: FAILURE
                       alias_id: null
-                      alias_type: null
-                      alias_value: null
+                      alias_type: MOBILE
+                      alias_value: '966512345678'
                       registration_id: null
-                      error_code: ALIAS_ALREADY_LINKED
-                      error_message: Alias is already linked to an account
+                      error_code: VB.OBIE.Bad.Request
+                      error_message: Provided partyId doesn't own provided account
         '400':
           description: module_slug is not ips-settings-alias-management, or the user is not linked to a customer.
           content:
@@ -853,8 +874,8 @@ paths:
       summary: Get Alias Management Workflow Status
       description: >
         AION's current status for an alias request, by the `id` returned by Start Alias Management
-        Workflow, for the user's company. If no request exists, the response is HTTP 200 with status
-        NONE.
+        Workflow, for the user's company. If no request exists for this id (or it belongs to another
+        company), the response is HTTP 200 with status NONE.
       operationId: getAliasManagementWorkflowStatus
       security:
         - bearerAuth: []
@@ -904,7 +925,7 @@ paths:
                     reference_no: AL1761462000
                     request_type: UNLINK_ALIAS
                     status: REJECTED
-                    process_status: ACTIVATION_COMPLETED
+                    process_status: ACTIVATION_FAILED
                 executionFailed:
                   summary: Approved, but the link / unlink failed on Vision Bank
                   value:
@@ -955,8 +976,8 @@ paths:
 
         - APPROVED → process_status ACTIVATION_COMPLETED.
 
-        - REJECTED → process_status ACTIVATION_FAILED; ErrorCode / ErrorMessage are saved and shown on
-        the request.
+        - REJECTED → process_status ACTIVATION_FAILED; ErrorCode / ErrorMessage are saved on the
+        request.
 
         The request status stays APPROVED. Sending the same status again returns the saved status
         (HTTP 200); a different status after the final one returns 409.
@@ -979,7 +1000,7 @@ paths:
           required: true
           description: >
             The workflow reference id (`id`) returned by Start Alias Management Workflow and sent to
-            Vision Bank as WorkflowReferenceId in execute.
+            Vision Bank as `Id` in execute.
           schema:
             type: string
           example: E77AC0E7-A540-407E-8DEF-D92273B4FD7E
@@ -1755,7 +1776,7 @@ components:
         AccountId:
           type: string
           description: Account the alias is linked to / unlinked from.
-          example: SA0380000000608010167519
+          example: '12344566778'
         AccountHolderType:
           type: string
           example: CORPORATE
@@ -1814,8 +1835,9 @@ components:
           enum: [ACTIVATION_PENDING, ACTIVATION_COMPLETED, ACTIVATION_FAILED]
           description: >
             ACTIVATION_PENDING until the decision is sent to Vision Bank, then ACTIVATION_COMPLETED
-            (Vision Bank accepted it) or ACTIVATION_FAILED. An approved unlink stays ACTIVATION_PENDING
-            until Vision Bank sends the PH result (Update Alias Unlink Status).
+            (Vision Bank returned SUCCESS) or ACTIVATION_FAILED (Vision Bank returned FAILURE, or the
+            decision was REJECTED). An approved unlink stays ACTIVATION_PENDING until Vision Bank sends
+            the PH result (Update Alias Unlink Status).
         alias_response:
           $ref: '#/components/schemas/AliasManagementAliasResponse'
 
@@ -1823,31 +1845,43 @@ components:
       type: object
       description: >
         Vision Bank's execute result. Present only once the decision has been sent (single-owner
-        company).
+        company). For an unlink, result SUCCESS means it was sent to PH; the final result comes
+        through Update Alias Unlink Status.
       properties:
         result:
           type: string
           nullable: true
+          description: Vision Bank's Result (SUCCESS / FAILURE).
           example: SUCCESS
         alias_id:
           type: string
           nullable: true
+          description: Not returned by Vision Bank's execute response — always null.
         alias_type:
           type: string
           nullable: true
+          description: Vision Bank's AliasType.
+          example: MOBILE
         alias_value:
           type: string
           nullable: true
+          description: Vision Bank's AliasValue.
+          example: '966512345678'
         registration_id:
           type: string
           nullable: true
+          description: Vision Bank's RegistrationId — link only, null for an unlink.
+          example: 9cbce49c-7062-46dc-a9f9-05967d7970ee
         error_code:
           type: string
           nullable: true
-          example: ALIAS_ALREADY_LINKED
+          description: Vision Bank's ErrorCode on FAILURE.
+          example: VB.OBIE.Bad.Request
         error_message:
           type: string
           nullable: true
+          description: Vision Bank's ErrorMessage on FAILURE.
+          example: Provided partyId doesn't own provided account
 
     AliasManagementWorkflowStatusResponse:
       type: object
@@ -1879,7 +1913,8 @@ components:
           enum: [ACTIVATION_PENDING, ACTIVATION_COMPLETED, ACTIVATION_FAILED]
           description: >
             ACTIVATION_PENDING until the decision is sent to Vision Bank, then ACTIVATION_COMPLETED
-            (Vision Bank accepted it) or ACTIVATION_FAILED. An approved unlink stays ACTIVATION_PENDING
+            (Vision Bank returned SUCCESS) or ACTIVATION_FAILED (Vision Bank returned FAILURE, or the
+            request was rejected by an approver). An approved unlink stays ACTIVATION_PENDING
             until Vision Bank sends the PH result (Update Alias Unlink Status): APPROVED →
             ACTIVATION_COMPLETED, REJECTED → ACTIVATION_FAILED. Not returned when status is NONE.
 
