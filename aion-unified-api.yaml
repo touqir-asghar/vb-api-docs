@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: AION Unified API — Partner & Internal Integration
-  version: "1.0.0"
+  version: "1.1.0"
   description: |
     Unified specification for AION's cross-service integration APIs, merged from
     previously separate documents:
@@ -16,6 +16,8 @@ info:
        maker-checker approval and read its status.
     5. **Alias Management (Vision Bank)** — start an alias link / unlink request for
        maker-checker approval, read its status, and send the final unlink result.
+    6. **Request to Pay (Vision Bank)** — start sending an outgoing RTP or paying an incoming RTP
+       for maker-checker approval, and read its status.
 
     ## Common request headers
 
@@ -95,6 +97,44 @@ info:
        result (APPROVED / REJECTED) by `id`. Service-to-service call: basic-auth X-Access-Token, no
        user token.
 
+    ## Request to Pay flow (Vision Bank)
+
+    Two AION modules run the approval workflow: `request-to-pay-send` (send an outgoing RTP) and
+    `request-to-pay-pay` (pay an incoming RTP). `request-to-pay-decline` has no workflow - Vision Bank
+    only checks the user's permission with SME Validations. Cancelling an outgoing RTP is not supported.
+
+    1. **SME Validations** (`module_slug=request-to-pay-send` / `request-to-pay-pay` /
+       `request-to-pay-decline`) - can the user initiate the action. Send and pay return the corporate
+       limits; decline has no limits (`limits: null`). A user can decline with the initiate or the
+       approve permission on `request-to-pay-decline`.
+    2. **Start Request to Pay Workflow** - after the user's OTP is verified. Vision Bank sends
+       `module_slug` and its `RequestToPayId` (unique per request). AION reads the RTP from Vision Bank's
+       payment-store-adapter `GET /protected/v1/payments/request-to-pay/{RequestToPayId}`, checks the
+       corporate limit on the amount (no user limits) and starts the approval workflow (reviewer matrix,
+       then Wathq approvers; no OTP).
+       - Send: our customer's account is `RequestSenderAccount`, the counterparty `RequestReceiverAccount`.
+       - Pay: our customer's account is `RequestReceiverAccount`, the requester `RequestSenderAccount`.
+         The RTP must still be `Pending` and not expired (BRD UC-04 step 9).
+       - Single-owner company: approved straight away and executed.
+       - Otherwise: `AWAITING_AUTHORIZATION`.
+    3. **Execute** - on the final decision AION sends `{ requestToPayId, decision, moduleSlug }`, with
+       decision APPROVED or REJECTED, to Vision Bank:
+       - send: rtp-service execute endpoint;
+       - pay: payment-consent-service `POST /protected/v1/sme/aion/execute` (same endpoint as transfers).
+
+       Vision Bank's response is stored on the request. When Vision Bank accepts the call, process_status
+       is ACTIVATION_COMPLETED; when the call fails, ACTIVATION_FAILED. An expired RTP cannot be approved
+       or executed (BRD UC-03 BR-01 / UC-04 BR-04): the approver gets "This request has expired and
+       cannot be approved."
+    4. **Get Request to Pay Workflow Status** - AION's current status for the latest request started
+       with a `RequestToPayId`.
+
+    **RequestToPayId is unique per request:** a `RequestToPayId` can start only one request (send and
+    pay); a resubmission after a rejection comes with a new `RequestToPayId`.
+
+    **One payment at a time per RTP (BRD UC-04 BR-05, pay only):** the RTP is identified by its
+    `EndToEndIdentification`. A new pay request is blocked while one for the same RTP is pending approval
+    or approved; after a rejected or failed one, a new pay request (new `RequestToPayId`) is allowed.
   contact:
     name: AION Digital Engineering
 
@@ -121,6 +161,8 @@ tags:
     description: Bill payment service — MOI government bill refund workflow initiation and status.
   - name: Reference Alias Management Workflow
     description: Money transfer service — alias link / unlink workflow initiation, status and unlink status update.
+  - name: Reference Request to Pay Workflow
+    description: Money transfer service — Request to Pay (send / pay incoming) workflow initiation and status.
   - name: User Access Profile
     description: Entitlement service — user roles, modules, and permissions lookup.
   - name: System Audit Logs
@@ -1078,6 +1120,254 @@ paths:
               schema:
                 $ref: '#/components/schemas/AliasManagementErrorResponse'
 
+  /api/v2/money-transfers/request-to-pay/work-flow-process:
+    post:
+      tags: [Reference Request to Pay Workflow]
+      summary: Start Request to Pay Workflow
+      description: >
+        Starts the approval workflow for sending an outgoing RTP (`request-to-pay-send`) or paying an
+        incoming RTP (`request-to-pay-pay`). AION reads the RTP from Vision Bank by `RequestToPayId`
+        (payment-store-adapter GET /protected/v1/payments/request-to-pay/{RequestToPayId}), checks the
+        corporate limit on the amount, stores the request and starts the workflow (reviewer matrix, then
+        Wathq approvers; no OTP). For pay, the RTP must be `Pending` and not expired. X-Access-Token
+        token is a trusted Forgerock token (Vision Bank) which is user JWT received from API Gateway.
+      operationId: startRequestToPayWorkflow
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XAccessToken'
+        - $ref: '#/components/parameters/XCorrelationId'
+        - $ref: '#/components/parameters/XDeviceId'
+        - $ref: '#/components/parameters/XRequesterLang'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartRequestToPayRequest'
+            examples:
+              send:
+                summary: Send a request to pay (outgoing RTP)
+                value:
+                  module_slug: request-to-pay-send
+                  RequestToPayId: 3f6c1e52-9a41-4d0b-8c7e-5b2a9d417e10
+              pay:
+                summary: Pay an incoming request to pay
+                value:
+                  module_slug: request-to-pay-pay
+                  RequestToPayId: 8d2f4b90-1c3e-4a7d-b5f6-2e9c0a1d3f47
+      responses:
+        '201':
+          description: Request created and workflow started.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartRequestToPayResponse'
+              examples:
+                awaitingApproval:
+                  summary: Needs approval
+                  value:
+                    reference_id: 3f6c1e52-9a41-4d0b-8c7e-5b2a9d417e10
+                    id: 2D4FC6C8-0D5F-4208-BE4C-161BD2EE7223
+                    module_slug: request-to-pay-send
+                    request_type: SEND_RTP
+                    status: AWAITING_AUTHORIZATION
+                    process_status: ACTIVATION_PENDING
+                singleOwner:
+                  summary: Single owner - approved straight away
+                  value:
+                    reference_id: 8d2f4b90-1c3e-4a7d-b5f6-2e9c0a1d3f47
+                    id: 5A1B7C3D-2E4F-4A6B-8C9D-0E1F2A3B4C5D
+                    module_slug: request-to-pay-pay
+                    request_type: PAY_RTP
+                    status: APPROVED
+                    process_status: ACTIVATION_COMPLETED
+        '400':
+          description: >
+            module_slug is not request-to-pay-send / request-to-pay-pay (request-to-pay-decline has no
+            workflow), the user is not linked to a customer, or no corporate limit is set up for the
+            module (name = CORPORATE_LIMIT_NOT_FOUND).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequestToPayErrorResponse'
+              example:
+                statusCode: 400
+                name: BadRequestException
+                errors:
+                  statusCode: 400
+                  message: module_slug request-to-pay-decline has no approval workflow
+                  error: Bad Request
+                timestamp: '2026-11-15T09:00:00.000Z'
+                path: /rubix/api/v2/money-transfers/request-to-pay/work-flow-process
+        '401':
+          description: Missing or invalid user token.
+        '403':
+          $ref: '#/components/responses/RequestToPayForbidden'
+        '409':
+          description: >
+            This RequestToPayId already started a request (send and pay). Pay only (BRD UC-04 BR-05): the
+            same RTP (EndToEndIdentification) already has a pay request that is pending approval or approved
+            (a rejected or failed one does not block).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequestToPayErrorResponse'
+              examples:
+                reused:
+                  summary: RequestToPayId already used
+                  value:
+                    statusCode: 409
+                    name: ConflictException
+                    errors:
+                      statusCode: 409
+                      message: This Request to Pay request is already pending approval (reference_id 3f6c1e52-9a41-4d0b-8c7e-5b2a9d417e10)
+                      error: Conflict
+                    timestamp: '2026-11-15T09:00:00.000Z'
+                    path: /rubix/api/v2/money-transfers/request-to-pay/work-flow-process
+                payInProgress:
+                  summary: Pay - the same RTP (EndToEndIdentification) already has an active pay request
+                  value:
+                    statusCode: 409
+                    name: ConflictException
+                    errors:
+                      statusCode: 409
+                      message: This Request to Pay already has a PAY_RTP request that is pending or approved (reference_id 6a0c3e91-2b4d-4f8a-9c1e-7d5b3a2f1e08)
+                      error: Conflict
+                    timestamp: '2026-11-15T09:00:00.000Z'
+                    path: /rubix/api/v2/money-transfers/request-to-pay/work-flow-process
+        '422':
+          description: >
+            - The request body is invalid (name = INPUT_VALIDATION_ERROR).
+
+            - The RTP returned by Vision Bank is missing a required field (Type, Amount, Currency, our
+            customer's account Identification, ExpiryDate; for pay also EndToEndIdentification) or its Type
+            does not match module_slug
+            (send = Outgoing, pay = Incoming) (name = UnprocessableEntityException).
+
+            - Pay only: the RTP Status is not Pending (name = UnprocessableEntityException), or the RTP
+            has expired (name = RTP_REQUEST_EXPIRED).
+
+            - The amount exceeds the corporate limit (name = CORPORATE_DAILY_TRANSACTION_LIMIT_EXCEEDED,
+            CORPORATE_PER_TRANSACTION_LIMIT_EXCEEDED or CORPORATE_GLOBAL_DAILY_LIMIT_EXCEEDED).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequestToPayErrorResponse'
+              examples:
+                typeMismatch:
+                  summary: Outgoing RTP sent with request-to-pay-pay
+                  value:
+                    statusCode: 422
+                    name: UnprocessableEntityException
+                    errors:
+                      statusCode: 422
+                      message: Request to Pay 3f6c1e52-9a41-4d0b-8c7e-5b2a9d417e10 is missing or has an invalid type (Outgoing does not match Incoming)
+                      error: Unprocessable Entity
+                    timestamp: '2026-11-15T09:00:00.000Z'
+                    path: /rubix/api/v2/money-transfers/request-to-pay/work-flow-process
+                notPending:
+                  summary: Pay - the RTP is no longer Pending
+                  value:
+                    statusCode: 422
+                    name: UnprocessableEntityException
+                    errors:
+                      statusCode: 422
+                      message: This Request to Pay is Paid and cannot be paid (RequestToPayId 8d2f4b90-1c3e-4a7d-b5f6-2e9c0a1d3f47)
+                      error: Unprocessable Entity
+                    timestamp: '2026-11-15T09:00:00.000Z'
+                    path: /rubix/api/v2/money-transfers/request-to-pay/work-flow-process
+                expired:
+                  summary: Pay - the RTP has expired
+                  value:
+                    statusCode: 422
+                    name: RTP_REQUEST_EXPIRED
+                    errors:
+                      - name: RTP_REQUEST_EXPIRED
+                        message: This request has expired and cannot be approved.
+                        developerMessage: The Request to Pay expired on 2026-11-20T23:59:59+03:00
+                    timestamp: '2026-11-15T09:00:00.000Z'
+                    path: /rubix/api/v2/money-transfers/request-to-pay/work-flow-process
+
+  /api/v2/money-transfers/request-to-pay/{reference_id}/workflow-status:
+    get:
+      tags: [Reference Request to Pay Workflow]
+      summary: Get Request to Pay Workflow Status
+      description: >
+        AION's current status for the latest request started with this `RequestToPayId`, for the user's
+        company. If no request exists for it (or it belongs to another company), the response is HTTP
+        200 with status NONE. After the final decision, process_status shows the outcome of the execute
+        call to Vision Bank: ACTIVATION_COMPLETED when Vision Bank accepted the decision (APPROVED or
+        REJECTED), ACTIVATION_FAILED when the call failed or the RTP had expired before execution.
+      operationId: getRequestToPayWorkflowStatus
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/XAccessToken'
+        - $ref: '#/components/parameters/XCorrelationId'
+        - $ref: '#/components/parameters/XDeviceId'
+        - $ref: '#/components/parameters/XRequesterLang'
+        - name: reference_id
+          in: path
+          required: true
+          description: The `RequestToPayId` sent to Start Request to Pay Workflow.
+          schema:
+            type: string
+          example: 3f6c1e52-9a41-4d0b-8c7e-5b2a9d417e10
+      responses:
+        '200':
+          description: Current status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequestToPayWorkflowStatusResponse'
+              examples:
+                awaitingApproval:
+                  summary: Pending approval
+                  value:
+                    reference_id: 3f6c1e52-9a41-4d0b-8c7e-5b2a9d417e10
+                    module_slug: request-to-pay-send
+                    id: 2D4FC6C8-0D5F-4208-BE4C-161BD2EE7223
+                    request_type: SEND_RTP
+                    status: AWAITING_AUTHORIZATION
+                    process_status: ACTIVATION_PENDING
+                approved:
+                  summary: Approved and executed
+                  value:
+                    reference_id: 3f6c1e52-9a41-4d0b-8c7e-5b2a9d417e10
+                    module_slug: request-to-pay-send
+                    id: 2D4FC6C8-0D5F-4208-BE4C-161BD2EE7223
+                    request_type: SEND_RTP
+                    status: APPROVED
+                    process_status: ACTIVATION_COMPLETED
+                rejected:
+                  summary: Rejected by a reviewer or approver, REJECTED sent to Vision Bank
+                  value:
+                    reference_id: 8d2f4b90-1c3e-4a7d-b5f6-2e9c0a1d3f47
+                    module_slug: request-to-pay-pay
+                    id: 5A1B7C3D-2E4F-4A6B-8C9D-0E1F2A3B4C5D
+                    request_type: PAY_RTP
+                    status: REJECTED
+                    process_status: ACTIVATION_COMPLETED
+                executionFailed:
+                  summary: Approved, but the execute call failed or the RTP had expired
+                  value:
+                    reference_id: 8d2f4b90-1c3e-4a7d-b5f6-2e9c0a1d3f47
+                    module_slug: request-to-pay-pay
+                    id: 5A1B7C3D-2E4F-4A6B-8C9D-0E1F2A3B4C5D
+                    request_type: PAY_RTP
+                    status: APPROVED
+                    process_status: ACTIVATION_FAILED
+                notFound:
+                  summary: No request for this RequestToPayId
+                  value:
+                    reference_id: 3f6c1e52-9a41-4d0b-8c7e-5b2a9d417e10
+                    status: NONE
+        '401':
+          description: Missing or invalid user token.
+        '403':
+          $ref: '#/components/responses/RequestToPayForbidden'
+
   /v1/user/access-profile-context:
     get:
       tags: [User Access Profile]
@@ -1295,6 +1585,10 @@ paths:
         response is `eligible: false` with `reason` = `REFUND_ALREADY_IN_REVIEW` (pending approval)
         or `REFUND_ALREADY_COMPLETED` (approved), and `existing_request`. A rejected or failed
         refund does not block a new one.
+
+        **Request to Pay:** `request-to-pay-send` and `request-to-pay-pay` return the corporate
+        limits; `request-to-pay-decline` has no limits (`limits` is `null`). For
+        `request-to-pay-decline` the user is eligible with the initiate or the approve permission.
       operationId: getCorporateValidations
       security:
         - bearerAuth: []
@@ -1314,6 +1608,9 @@ paths:
               - transfer_management-domestic_bank_transfer
               - beneficiary_management
               - term_deposit
+              - request-to-pay-send
+              - request-to-pay-pay
+              - request-to-pay-decline
               - moi-refund
           example: transfer_management-domestic_bank_transfer
         - name: end_to_end_identification
@@ -1470,6 +1767,21 @@ components:
               error: Forbidden
             timestamp: '2026-10-26T09:00:00.000Z'
             path: /rubix/api/v2/money-transfers/aliases/work-flow-process
+    RequestToPayForbidden:
+      description: The user does not have the create / initiate permission on the module_slug.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/RequestToPayErrorResponse'
+          example:
+            statusCode: 403
+            name: ForbiddenException
+            errors:
+              statusCode: 403
+              message: User does not have create/initiate permission on module [request-to-pay-send]
+              error: Forbidden
+            timestamp: '2026-11-15T09:00:00.000Z'
+            path: /rubix/api/v2/money-transfers/request-to-pay/work-flow-process
     MoiRefundForbidden:
       description: The user is not allowed to perform this action on `moi-refund`.
       content:
@@ -1962,6 +2274,87 @@ components:
 
     AliasManagementErrorResponse:
       description: Error envelope returned by the Alias Management endpoints (same shape as MOI Refund).
+      allOf:
+        - $ref: '#/components/schemas/MoiRefundErrorResponse'
+
+    StartRequestToPayRequest:
+      type: object
+      required: [module_slug, RequestToPayId]
+      properties:
+        module_slug:
+          type: string
+          enum: [request-to-pay-send, request-to-pay-pay]
+          description: request-to-pay-send to send an outgoing RTP, request-to-pay-pay to pay an incoming RTP.
+          example: request-to-pay-send
+        RequestToPayId:
+          type: string
+          maxLength: 255
+          description: >
+            Vision Bank's Request to Pay id, unique per request. AION reads the RTP details from Vision
+            Bank by this id.
+          example: 3f6c1e52-9a41-4d0b-8c7e-5b2a9d417e10
+
+    StartRequestToPayResponse:
+      type: object
+      properties:
+        reference_id:
+          type: string
+          description: The RequestToPayId sent in the request.
+          example: 3f6c1e52-9a41-4d0b-8c7e-5b2a9d417e10
+        id:
+          type: string
+          description: AION Request to Pay request id.
+          example: 2D4FC6C8-0D5F-4208-BE4C-161BD2EE7223
+        module_slug:
+          type: string
+          example: request-to-pay-send
+        request_type:
+          type: string
+          enum: [SEND_RTP, PAY_RTP]
+          description: SEND_RTP for request-to-pay-send, PAY_RTP for request-to-pay-pay.
+        status:
+          type: string
+          enum: [AWAITING_AUTHORIZATION, APPROVED, REJECTED]
+          description: Maker-checker status after the workflow started. APPROVED for a single-owner company.
+        process_status:
+          type: string
+          enum: [ACTIVATION_PENDING, ACTIVATION_COMPLETED, ACTIVATION_FAILED]
+          description: >
+            ACTIVATION_PENDING until the decision is sent to Vision Bank; then the outcome of the execute
+            call (ACTIVATION_COMPLETED / ACTIVATION_FAILED).
+
+    RequestToPayWorkflowStatusResponse:
+      type: object
+      required: [reference_id, status]
+      properties:
+        reference_id:
+          type: string
+          description: The RequestToPayId from the request path.
+        module_slug:
+          type: string
+          description: Not present when status is NONE.
+          example: request-to-pay-send
+        id:
+          type: string
+          description: AION Request to Pay request id. Not present when status is NONE.
+        request_type:
+          type: string
+          enum: [SEND_RTP, PAY_RTP]
+          description: Not present when status is NONE.
+        status:
+          type: string
+          enum: [DRAFT, AWAITING_AUTHORIZATION, APPROVED, REJECTED, NONE]
+          description: Maker-checker status. NONE when no request exists for this RequestToPayId.
+        process_status:
+          type: string
+          enum: [ACTIVATION_PENDING, ACTIVATION_COMPLETED, ACTIVATION_FAILED]
+          description: >
+            ACTIVATION_PENDING until the decision is sent to Vision Bank. After the final decision:
+            ACTIVATION_COMPLETED when Vision Bank accepted it, ACTIVATION_FAILED when the call failed or the
+            RTP had expired. Not present when status is NONE.
+
+    RequestToPayErrorResponse:
+      description: Error envelope returned by the Request to Pay endpoints (same shape as MOI Refund).
       allOf:
         - $ref: '#/components/schemas/MoiRefundErrorResponse'
 
