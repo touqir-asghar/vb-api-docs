@@ -1,7 +1,8 @@
 # AION Unified API
 
 OpenAPI specification for the APIs shared between AION and Vision Bank (reference beneficiary,
-transfer, bill payment, MOI refund, user access profile, audit logs, SME validations).
+transfer, bill payment, MOI refund, alias management, Request to Pay, user access profile, audit logs,
+SME validations).
 
 ## View the latest version (no import needed)
 
